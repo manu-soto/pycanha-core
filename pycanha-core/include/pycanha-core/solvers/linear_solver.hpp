@@ -151,6 +151,9 @@ class SparseLinearSolver {
     [[nodiscard]] virtual bool factors_recomputed() const noexcept {
         return true;
     }
+    /// Iterations of the last factorize_and_solve() that iterated on the
+    /// previous factors, 0 when it factorised or the solver does not iterate.
+    [[nodiscard]] virtual int iterative_steps() const noexcept { return 0; }
     [[nodiscard]] virtual bool iterative() const noexcept { return false; }
 };
 

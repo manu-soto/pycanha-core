@@ -23,6 +23,7 @@ TEST_CASE("SSLU_CGS defaults", "[solver][sslu_cgs]") {
     const pycanha::SSLU_CGS solver(model);
     REQUIRE(solver.solver_type == IterativeSolverType::MIN_DEGREE);
     REQUIRE(solver.pardiso_iparm_3 == 61);
+    REQUIRE(solver.cgs_refactor_iterations == 0);
 }
 
 TEST_CASE("SSLU_CGS rejects a solve without an iterative step",
@@ -74,6 +75,35 @@ TEST_CASE("SSLU_CGS matches SSLU on a radiative plate", "[solver][sslu_cgs]") {
             1e-6);
     // One factorisation, the other passes iterate on it.
     REQUIRE(solver.num_factorizations() == 1);
+}
+
+TEST_CASE("SSLU_CGS factorises again when the iteration slows down",
+          "[solver][sslu_cgs]") {
+    // From 250 K each pass of the radiative plate moves the 4 sigma T^3 terms
+    // away from the first factors. A threshold no pass reaches keeps them, as
+    // PARDISO's own rule does; a threshold of one iteration factorises again
+    // after the first pass that iterated more. Both converge to SSLU's answer.
+    constexpr double abstol = 1e-8;
+    const auto model = models::make_plate(20, /*radiation=*/true);
+    const auto reference = solve_with_sslu(model, abstol);
+
+    const auto solve_from_250 = [&](int threshold) {
+        models::reset_temperatures(model, 250.0);
+        pycanha::SSLU_CGS solver(model);
+        solver.pardiso_iparm_3 = 91;
+        solver.max_iters = 100;
+        solver.abstol_temp = abstol;
+        solver.cgs_refactor_iterations = threshold;
+        solver.initialize();
+        solver.solve();
+        REQUIRE(solver.solver_converged);
+        REQUIRE(models::max_difference(models::temperatures(model),
+                                       reference) < 1e-6);
+        return solver.num_factorizations();
+    };
+
+    REQUIRE(solve_from_250(1000) == 1);
+    REQUIRE(solve_from_250(1) > 1);
 }
 
 TEST_CASE("SSLU_CGS uses Cholesky and CG on a conduction model",

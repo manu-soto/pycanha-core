@@ -118,6 +118,7 @@ void SteadyStateSolver::initialize_linearised(
     _initialized_non_zeros = {KLdd.nonZeros(), KLdb.nonZeros(), KRdd.nonZeros(),
                               KRdb.nonZeros()};
     _has_factors = false;
+    _refactor_next = false;
 
     _linear_solver->analyze_pattern(_a_matrix);
     if (!_linear_solver->succeeded()) {
@@ -231,7 +232,7 @@ bool SteadyStateSolver::factorize_and_solve_step() {
                             "{} iteration {}: matrix unchanged, solved with "
                             "the existing factors.",
                             solver_name, solver_iter + 1);
-    } else if (_has_factors && linear_solver.iterative()) {
+    } else if (_has_factors && !_refactor_next && linear_solver.iterative()) {
         linear_solver.factorize_and_solve(_a_matrix, _b, Td_solver);
         factors_recomputed = linear_solver.factors_recomputed();
         SPDLOG_LOGGER_DEBUG(get_logger(),
@@ -282,7 +283,18 @@ bool SteadyStateSolver::factorize_and_solve_step() {
         _factorized_values = Eigen::Map<const VectorXd>(_a_matrix.valuePtr(),
                                                         _a_matrix.nonZeros());
         _has_factors = true;
+        _refactor_next = false;
         ++_num_factorizations;
+    } else if (cgs_refactor_iterations > 0 &&
+               linear_solver.iterative_steps() > cgs_refactor_iterations) {
+        // This pass converged on the old factors, but slowly: the next one
+        // factorises the matrix it then sees.
+        _refactor_next = true;
+        SPDLOG_LOGGER_DEBUG(get_logger(),
+                            "{} iteration {}: {} iterations on the previous "
+                            "factors, factorising at the next pass.",
+                            solver_name, solver_iter + 1,
+                            linear_solver.iterative_steps());
     }
     return true;
 }
@@ -353,6 +365,7 @@ void SteadyStateSolver::solve_linearised() {
 void SteadyStateSolver::release_linearised() noexcept {
     _linear_solver.reset();
     _has_factors = false;
+    _refactor_next = false;
     _symmetric = false;
     _a_matrix = SpMatRow();
     _factorized_values.resize(0);

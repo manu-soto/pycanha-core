@@ -76,6 +76,7 @@ class PardisoSolver : public SparseLinearSolver {
     [[nodiscard]] Eigen::Index perturbed_pivots() const noexcept override;
     [[nodiscard]] Eigen::Index factor_nonzeros() const noexcept override;
     [[nodiscard]] bool factors_recomputed() const noexcept override;
+    [[nodiscard]] int iterative_steps() const noexcept override;
     [[nodiscard]] bool iterative() const noexcept override;
 
     [[nodiscard]] Eigen::ComputationInfo info() const noexcept;

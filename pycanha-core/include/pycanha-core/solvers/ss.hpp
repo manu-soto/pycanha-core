@@ -38,6 +38,19 @@ class SteadyStateSolver : public Solver {
     /// Cholesky is chosen with DirectSolverType::LDLT instead.
     bool allow_cholesky = true;
 
+    /// SSLU_CGS: factorise again at the next pass when the last pass needed
+    /// more than this many CGS/CG iterations on the previous factors. 0 keeps
+    /// PARDISO's own rule: refactorise only when the iteration fails.
+    ///
+    /// The iteration uses the last factorisation as its preconditioner, so
+    /// every pass pays for how far the matrix has moved since then. Over a
+    /// sequence of solves whose temperatures drift (a heater control loop
+    /// calling solve() for each new power), the radiative 4 sigma T^3 terms
+    /// drift with them, and with PARDISO's rule the first factors are kept to
+    /// the end: on large radiative models every pass then iterates longer
+    /// than one new factorisation takes.
+    int cgs_refactor_iterations = 0;
+
     /// The last initialize() chose a Cholesky-type factorisation.
     [[nodiscard]] bool uses_cholesky() const noexcept { return _symmetric; }
     /// Numerical factorisations done by the last solve().
@@ -64,6 +77,8 @@ class SteadyStateSolver : public Solver {
     VectorXd _b;
     VectorXd _factorized_values;
     bool _has_factors = false;
+    // The last iterative pass went past cgs_refactor_iterations.
+    bool _refactor_next = false;
 
     VectorXd _t_cubed_domain;
     VectorXd _t_fourth_boundary;
