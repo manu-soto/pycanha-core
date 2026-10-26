@@ -216,6 +216,11 @@ bool PardisoSolver::factors_recomputed() const noexcept {
            _iparm[iparm_cgs_diagnostic] <= 0;
 }
 
+int PardisoSolver::iterative_steps() const noexcept {
+    return factors_recomputed() ? 0
+                                : static_cast<int>(_iparm[iparm_cgs_diagnostic]);
+}
+
 bool PardisoSolver::iterative() const noexcept {
     return _iparm[iparm_iterative] != 0;
 }
