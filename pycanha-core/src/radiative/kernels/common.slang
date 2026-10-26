@@ -191,6 +191,42 @@ public void fp_add_raw(FpBuffer buf, uint idx, uint64_t value) {
 #endif
 }
 
+// Adds every lane's value to ONE cell that the whole subgroup shares — the
+// space, inactive and lost columns of the emitter row: all lanes of a
+// workgroup trace from the same emitter (gid.y), so they share the row.
+// Without this, every path of the row ending there hit the same u64 cell with
+// its own atomic. The lanes' values are summed in the subgroup first and one
+// lane adds the total. The sum is split into 16-bit limbs so that only 32-bit
+// subgroup arithmetic is needed (no shaderSubgroupExtendedTypes): a subgroup
+// of at most 128 lanes sums each limb below 2^23, and recombining the limbs
+// wraps exactly like the u64 additions it replaces, so the cell receives the
+// same integer as before — bit-identical results.
+//
+// Call it in UNIFORM control flow only (every lane of the subgroup reaching
+// the call; lanes with nothing to add pass zero). In divergent code the set of
+// lanes a subgroup operation combines is not pinned down, the five operations
+// below need not see the same set, and a compiler may move them out of the
+// branch: called from inside the bounce loop this lost or doubled deposits.
+public void fp_add_raw_subgroup(FpBuffer buf, uint idx, uint64_t value) {
+#if defined(PYCANHA_METAL_BACKEND)
+    if (value != uint64_t(0)) {
+        fp_add_raw(buf, idx, value);
+    }
+#else
+    uint lo = uint(value & 0xFFFFFFFFull);
+    uint hi = uint(value >> 32);
+    uint64_t l0 = uint64_t(WaveActiveSum(lo & 0xFFFFu));
+    uint64_t l1 = uint64_t(WaveActiveSum(lo >> 16));
+    uint64_t l2 = uint64_t(WaveActiveSum(hi & 0xFFFFu));
+    uint64_t l3 = uint64_t(WaveActiveSum(hi >> 16));
+    uint64_t total = l0 + (l1 << 16) + (l2 << 32) + (l3 << 48);
+    // Adding zero changes nothing, so the empty case skips the atomic.
+    if (WaveIsFirstLane() && total != uint64_t(0)) {
+        InterlockedAdd(buf[idx], total);
+    }
+#endif
+}
+
 // Single definition of the float deposit, so the two backends' integer paths
 // cannot drift apart.
 public void fp_add(FpBuffer buf, uint idx, float value) {

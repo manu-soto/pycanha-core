@@ -26,26 +26,19 @@ import common;
 // deposits go through fp_add / fp_add_raw, never a raw InterlockedAdd here.
 [[vk::binding(9, 0)]] FpBuffer acc;
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void csMain(uint3 gid: SV_DispatchThreadID) {
-    uint ray_local = gid.x;
-    uint e = gid.y;
-    if (ray_local >= pc.rays_this_chunk || e >= pc.num_emitters) {
-        return;
-    }
-    // The emitter face comes from the emitters buffer, NEVER from gid
-    // arithmetic over faces; ray_index includes the chunk offset so results
-    // are invariant under dispatch chunking.
-    uint face = emitters[e];
-    uint ray_index = pc.ray_index_offset + ray_local;
+// What one path leaves in the row's virtual columns (space, inactive, lost),
+// in wrapping u64. These cells are shared by every lane of the workgroup, so
+// csMain adds them once per subgroup after the path (fp_add_raw_subgroup).
+struct Tails {
+    uint64_t space;
+    uint64_t inactive;
+    uint64_t lost;
+};
+
+// One path from `face`: deposits on real faces go to the accumulator
+// directly, the balances that end in a virtual column go to `tails`.
+void trace_path(uint face, uint ray_index, uint row_base, inout Tails tails) {
     Rng rng = rng_init(face, ray_index, pc.batch_seed);
-    uint stride = pc.num_faces + 3u;
-    // Block-relative accumulator row base.
-    uint row_base = (face - pc.row_offset) * stride;
-    uint space_col = pc.num_faces;
-    uint inactive_col = pc.num_faces + 1u;
-    uint lost_col = pc.num_faces + 2u;
 
     EmittedRay ray = emit_from_face(face, rng);
     float3 origin = ray.origin;
@@ -58,7 +51,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     for (uint bounce = 0u; bounce < pc.max_bounces; ++bounce) {
         Hit hit = trace_ray(origin, dir);
         if (hit.miss) {
-            fp_add_raw(acc, row_base + space_col, fp_remaining);
+            tails.space += fp_remaining;
             return;
         }
         // One load per bounce: the flags and the material index live in the
@@ -74,7 +67,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         if ((record & FACE_FLAG_ACTIVE) == 0u) {
             // Non-radiative face: absorbed, but scored apart so the
             // consumer can decide what that energy means.
-            fp_add_raw(acc, row_base + inactive_col, fp_remaining);
+            tails.inactive += fp_remaining;
             return;
         }
 
@@ -109,11 +102,11 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
                 // Wrapping subtraction: the boost's fixed-point gain is
                 // withdrawn from the lost column to keep the row balance
                 // exact.
-                fp_add_raw(acc, row_base + lost_col, fp_remaining - fp_boost);
+                tails.lost += fp_remaining - fp_boost;
                 fp_remaining = fp_boost;
                 energy = pc.energy_threshold;
             } else {
-                fp_add_raw(acc, row_base + lost_col, fp_remaining);
+                tails.lost += fp_remaining;
                 return;
             }
         }
@@ -133,5 +126,31 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         }
     }
     // The max_bounces safety bound killed the ray.
-    fp_add_raw(acc, row_base + lost_col, fp_remaining);
+    tails.lost += fp_remaining;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csMain(uint3 gid: SV_DispatchThreadID) {
+    uint e = gid.y;
+    if (e >= pc.num_emitters) {
+        return;  // the whole workgroup: control flow stays uniform
+    }
+    // The emitter face comes from the emitters buffer, NEVER from gid
+    // arithmetic over faces; ray_index includes the chunk offset so results
+    // are invariant under dispatch chunking.
+    uint face = emitters[e];
+    uint stride = pc.num_faces + 3u;
+    // Block-relative accumulator row base.
+    uint row_base = (face - pc.row_offset) * stride;
+
+    // Lanes past the chunk's rays do not return early: they take part in the
+    // subgroup sums below with zeros, so those run in uniform control flow.
+    Tails tails = { uint64_t(0), uint64_t(0), uint64_t(0) };
+    if (gid.x < pc.rays_this_chunk) {
+        trace_path(face, pc.ray_index_offset + gid.x, row_base, tails);
+    }
+    fp_add_raw_subgroup(acc, row_base + pc.num_faces, tails.space);
+    fp_add_raw_subgroup(acc, row_base + pc.num_faces + 1u, tails.inactive);
+    fp_add_raw_subgroup(acc, row_base + pc.num_faces + 2u, tails.lost);
 }
