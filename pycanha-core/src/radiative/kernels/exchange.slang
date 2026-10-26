@@ -47,7 +47,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     uint inactive_col = pc.num_faces + 1u;
     uint lost_col = pc.num_faces + 2u;
 
-    EmittedRay ray = emit_from_face(face, rng);
+    EmittedRay ray = emit_from_face(face, ray_index, rng);
     float3 origin = ray.origin;
     float3 dir = ray.direction;
     float energy = 1.0;

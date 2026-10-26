@@ -318,6 +318,20 @@ if(PYCANHA_OPTION_RAYTRACING)
     )
     add_dependencies(${LIB_NAME} pycanha_kernel_vf pycanha_kernel_exchange
         pycanha_kernel_solar)
+    if(PYCANHA_KERNEL_TARGET STREQUAL "spirv")
+        # TraceSettings::sampler == Sobol: each kernel compiled again with the
+        # QMC emission in (common.slang, PYCANHA_QMC), so that the default
+        # kernels carry none of it. Metal selects it with a push-constant flag.
+        foreach(_kernel IN ITEMS vf exchange solar)
+            pycanha_add_slang_kernel(${_kernel}_qmc
+                SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/kernels/${_kernel}.slang
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/kernels/common.slang
+                DEFINES PYCANHA_QMC
+                TARGET spirv
+            )
+            add_dependencies(${LIB_NAME} pycanha_kernel_${_kernel}_qmc)
+        endforeach()
+    endif()
     target_include_directories(${LIB_NAME} PRIVATE ${PYCANHA_KERNEL_EMBED_DIR})
 endif()
 

@@ -73,7 +73,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     // layout on both backends); rebuild the vector once per thread.
     float3 sun_dir = sun_direction();
 
-    SurfaceSample sample = sample_face_point(face, rng);
+    SurfaceSample sample = sample_face_point(face, ray_index, rng);
     float cos_theta = dot(sample.normal, -sun_dir);
     if (cos_theta <= 0.0) {
         return;  // this side faces away from the sun

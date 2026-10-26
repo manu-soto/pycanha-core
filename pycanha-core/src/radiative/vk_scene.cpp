@@ -20,8 +20,11 @@
 #include "pycanha-core/gmm/mesh/ops/compute_areas.hpp"
 #include "pycanha-core/gmm/mesh/trimesh.hpp"
 #include "pycanha-core/gmm/scene/coordinate_transformation.hpp"
+#include "pycanha-core/radiative/kernels/exchange_qmc_spv.h"
 #include "pycanha-core/radiative/kernels/exchange_spv.h"
+#include "pycanha-core/radiative/kernels/solar_qmc_spv.h"
 #include "pycanha-core/radiative/kernels/solar_spv.h"
+#include "pycanha-core/radiative/kernels/vf_qmc_spv.h"
 #include "pycanha-core/radiative/kernels/vf_spv.h"
 #include "pycanha-core/radiative/materials.hpp"
 #include "pycanha-core/radiative/scene.hpp"
@@ -48,6 +51,11 @@ constexpr std::uint32_t num_bindings = 12;
 // Host mirrors of the kernel flag bits in common.slang.
 constexpr std::uint32_t flag_normal_emission = 1;
 constexpr std::uint32_t flag_solar_band = 2;
+constexpr std::uint32_t flag_qmc = 4;
+
+std::uint32_t sampler_flags(const TraceSettings& settings) {
+    return settings.sampler == Sampler::Sobol ? flag_qmc : 0U;
+}
 
 // Tolerated float slack when validating that absorptivity + specular +
 // transmission of a band does not exceed one.
@@ -416,6 +424,12 @@ SceneImpl::~SceneImpl() {
     }
     if (_solar_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(_device.device, _solar_pipeline, nullptr);
+    }
+    for (VkPipeline pipeline :
+         {_vf_pipeline_qmc, _exchange_pipeline_qmc, _solar_pipeline_qmc}) {
+        if (pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(_device.device, pipeline, nullptr);
+        }
     }
     if (_pipeline_layout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(_device.device, _pipeline_layout, nullptr);
@@ -885,6 +899,19 @@ VkPipeline SceneImpl::build_compute_pipeline(
     return pipeline;
 }
 
+VkPipeline SceneImpl::pipeline_for(VkPipeline random, VkPipeline& sobol,
+                                   std::span<const std::uint32_t> spirv,
+                                   const char* what,
+                                   const TraceSettings& settings) {
+    if (settings.sampler != Sampler::Sobol) {
+        return random;
+    }
+    if (sobol == VK_NULL_HANDLE) {
+        sobol = build_compute_pipeline(spirv, what);
+    }
+    return sobol;
+}
+
 void SceneImpl::create_pipelines() {
     std::array<VkDescriptorSetLayoutBinding, num_bindings> bindings{};
     std::uint32_t binding_index = 0;
@@ -1045,8 +1072,11 @@ void SceneImpl::accumulate_vf(VfAccumImpl& acc, const TraceSettings& settings,
     }
 
     KernelDispatch kernel;
-    kernel.pipeline = _vf_pipeline;
-    kernel.flags = settings.normal_emission ? flag_normal_emission : 0U;
+    kernel.pipeline = pipeline_for(_vf_pipeline, _vf_pipeline_qmc,
+                                   kernels::vf_qmc_spv,
+                                   "VF QMC pipeline creation", settings);
+    kernel.flags = (settings.normal_emission ? flag_normal_emission : 0U) |
+                   sampler_flags(settings);
     write_storage_descriptor(9, acc.buffer());
     write_storage_descriptor(10, _dummy_buf.buffer);
     write_storage_descriptor(11, _dummy_buf.buffer);
@@ -1090,8 +1120,12 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
     const float fp_scale = acc.prepare_batch(settings.rays_per_face);
 
     KernelDispatch kernel;
-    kernel.pipeline = _exchange_pipeline;
-    kernel.flags = acc.band() == Band::Solar ? flag_solar_band : 0U;
+    kernel.pipeline =
+        pipeline_for(_exchange_pipeline, _exchange_pipeline_qmc,
+                     kernels::exchange_qmc_spv, "exchange QMC pipeline creation",
+                     settings);
+    kernel.flags = (acc.band() == Band::Solar ? flag_solar_band : 0U) |
+                   sampler_flags(settings);
     if (settings.normal_emission) {
         kernel.flags |= flag_normal_emission;
     }
@@ -1137,8 +1171,10 @@ void SceneImpl::accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
         acc.prepare_batch(sun, settings.rays_per_face);
 
     KernelDispatch kernel;
-    kernel.pipeline = _solar_pipeline;
-    kernel.flags = flag_solar_band;
+    kernel.pipeline = pipeline_for(_solar_pipeline, _solar_pipeline_qmc,
+                                   kernels::solar_qmc_spv,
+                                   "solar QMC pipeline creation", settings);
+    kernel.flags = flag_solar_band | sampler_flags(settings);
     kernel.fp_scale = setup.fp_scale;
     kernel.sun_dir = setup.sun_dir;
     write_storage_descriptor(9, acc.direct_buffer());

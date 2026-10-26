@@ -51,6 +51,11 @@ constexpr std::uint32_t workgroup_size_x = 64;
 // Host mirrors of the kernel flag bits in common.slang.
 constexpr std::uint32_t flag_normal_emission = 1;
 constexpr std::uint32_t flag_solar_band = 2;
+constexpr std::uint32_t flag_qmc = 4;
+
+[[nodiscard]] std::uint32_t sampler_flags(const TraceSettings& settings) {
+    return settings.sampler == Sampler::Sobol ? flag_qmc : 0U;
+}
 
 // Tolerated float slack when validating that absorptivity + specular +
 // transmission of a band does not exceed one.
@@ -695,7 +700,8 @@ void SceneImpl::accumulate_vf(VfAccumImpl& acc, const TraceSettings& settings,
     kernel.pipeline = _vf_pipeline;
     kernel.bindings = &_vf_bindings;
     kernel.acc = acc.buffer();
-    kernel.flags = settings.normal_emission ? flag_normal_emission : 0U;
+    kernel.flags = (settings.normal_emission ? flag_normal_emission : 0U) |
+                   sampler_flags(settings);
 
     if (acc.layout() == AccumLayout::Dense) {
         dispatch_rows(kernel, list, settings);
@@ -735,7 +741,8 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc, const TraceSettings&
     kernel.pipeline = _exchange_pipeline;
     kernel.bindings = &_exchange_bindings;
     kernel.acc = acc.buffer();
-    kernel.flags = acc.band() == Band::Solar ? flag_solar_band : 0U;
+    kernel.flags = (acc.band() == Band::Solar ? flag_solar_band : 0U) |
+                   sampler_flags(settings);
     if (settings.normal_emission) {
         kernel.flags |= flag_normal_emission;
     }
@@ -779,7 +786,7 @@ void SceneImpl::accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
     kernel.bindings = &_solar_bindings;
     kernel.acc = acc.direct_buffer();
     kernel.total_acc = acc.total_buffer();
-    kernel.flags = flag_solar_band;
+    kernel.flags = flag_solar_band | sampler_flags(settings);
     kernel.fp_scale = setup.fp_scale;
     kernel.sun_dir = setup.sun_dir;
     dispatch_rows(kernel, list, settings);
