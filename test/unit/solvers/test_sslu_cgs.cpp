@@ -76,6 +76,47 @@ TEST_CASE("SSLU_CGS matches SSLU on a radiative plate", "[solver][sslu_cgs]") {
     REQUIRE(solver.num_factorizations() == 1);
 }
 
+TEST_CASE("SSLU_CGS solved for the change keeps SSLU's answer at a loose "
+          "iterative step",
+          "[solver][sslu_cgs]") {
+    // A relative residual of 1e-4 (iparm_3 = 41) on the temperatures leaves
+    // errors far above abstol; on the change it shrinks with every pass.
+    constexpr double abstol = 1e-9;
+    const auto model = models::make_plate(20, /*radiation=*/true);
+    const auto reference = solve_with_sslu(model, abstol);
+
+    models::reset_temperatures(model, 250.0);
+    pycanha::SSLU_CGS solver(model);
+    solver.pardiso_iparm_3 = 41;
+    solver.max_iters = 100;
+    solver.abstol_temp = abstol;
+    REQUIRE(solver.correction_form);
+    solver.initialize();
+    solver.solve();
+    REQUIRE(solver.solver_converged);
+    REQUIRE(models::max_difference(models::temperatures(model), reference) <
+            1e-7);
+}
+
+TEST_CASE("SSLU gives the same answer solved for the change or not",
+          "[solver][sslu_cgs]") {
+    constexpr double abstol = 1e-10;
+    const auto model = models::make_plate(20, /*radiation=*/true);
+    const auto solve_sslu = [&](bool correction) {
+        models::reset_temperatures(model, 250.0);
+        pycanha::SSLU solver(model);
+        solver.correction_form = correction;
+        solver.max_iters = 100;
+        solver.abstol_temp = abstol;
+        solver.initialize();
+        solver.solve();
+        REQUIRE(solver.solver_converged);
+        return models::temperatures(model);
+    };
+    const auto direct = solve_sslu(false);
+    REQUIRE(models::max_difference(solve_sslu(true), direct) < 1e-9);
+}
+
 TEST_CASE("SSLU_CGS uses Cholesky and CG on a conduction model",
           "[solver][sslu_cgs]") {
     const auto model = models::make_plate(15, /*radiation=*/false);
