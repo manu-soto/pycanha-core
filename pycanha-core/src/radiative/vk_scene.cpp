@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +40,10 @@ namespace {
 // limit by bounding the rays per dispatch. TODO(radiative): replace the
 // fixed bound with timestamp-based calibration targeting ~0.25 s chunks.
 constexpr std::uint64_t max_rays_per_chunk_total = 1U << 22U;
+// Several chunks per submission (dispatch_batch): the target wall time of one
+// submission, and a bound on the chunks it may hold.
+constexpr double target_submit_seconds = 0.25;
+constexpr std::uint64_t max_chunks_per_submit = 256;
 
 constexpr std::uint32_t workgroup_size_x = 64;
 // Bindings 0-9 are the shared scene tables; 10-12 are the per-kernel
@@ -1239,27 +1244,42 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
 
     const std::uint64_t rays_per_chunk =
         std::max<std::uint64_t>(1, max_rays_per_chunk_total / emitters.size());
+    // Several chunks go in one submission. The chunks only add to the
+    // accumulator with integer atomics, which commute, so nothing between two
+    // chunks of a submission needs ordering, and the GPU no longer drains and
+    // waits for the host after every chunk (a few milliseconds of work on a
+    // current card). The count is calibrated on the first submission's wall
+    // time to keep each submission near target_submit_seconds, far below the
+    // ~2 s Windows watchdog whatever the device.
+    std::uint64_t chunks_per_submit = 1;
     std::uint64_t done = 0;
     while (done < settings.rays_per_face) {
-        const std::uint64_t chunk =
-            std::min(rays_per_chunk, settings.rays_per_face - done);
-        push.rays_this_chunk = static_cast<std::uint32_t>(chunk);
-        push.ray_index_offset = static_cast<std::uint32_t>(done);
-        const auto groups_x = static_cast<std::uint32_t>(
-            (chunk + workgroup_size_x - 1) / workgroup_size_x);
-
-        submit_once([this, &kernel, &push, groups_x](VkCommandBuffer cmd) {
+        const auto started = std::chrono::steady_clock::now();
+        std::uint64_t chunks_here = 0;
+        submit_once([this, &kernel, &push, &done, &chunks_here, &settings,
+                     rays_per_chunk, chunks_per_submit](VkCommandBuffer cmd) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                               kernel.pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                     _pipeline_layout, 0, 1, &_descriptor_set, 0,
                                     nullptr);
-            vkCmdPushConstants(cmd, _pipeline_layout,
-                               VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                               sizeof(PushConstants), &push);
-            vkCmdDispatch(cmd, groups_x, push.num_emitters, 1);
+            while (chunks_here < chunks_per_submit &&
+                   done < settings.rays_per_face) {
+                const std::uint64_t chunk =
+                    std::min(rays_per_chunk, settings.rays_per_face - done);
+                push.rays_this_chunk = static_cast<std::uint32_t>(chunk);
+                push.ray_index_offset = static_cast<std::uint32_t>(done);
+                const auto groups_x = static_cast<std::uint32_t>(
+                    (chunk + workgroup_size_x - 1) / workgroup_size_x);
+                vkCmdPushConstants(cmd, _pipeline_layout,
+                                   VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                   sizeof(PushConstants), &push);
+                vkCmdDispatch(cmd, groups_x, push.num_emitters, 1);
+                done += chunk;
+                ++chunks_here;
+            }
             // The accumulator is device-local now, so the host never reads it
-            // here; what the next chunk needs is to see this chunk's atomics.
+            // here; what the next submission needs is to see these atomics.
             // Separate submissions on one queue do not carry that dependency
             // by themselves. The readback adds its own transfer barrier.
             const VkMemoryBarrier barrier{
@@ -1273,7 +1293,15 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                                  &barrier, 0, nullptr, 0, nullptr);
         });
-        done += chunk;
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          started)
+                .count();
+        const double per_chunk = seconds / static_cast<double>(chunks_here);
+        chunks_per_submit = std::clamp<std::uint64_t>(
+            static_cast<std::uint64_t>(target_submit_seconds /
+                                       std::max(per_chunk, 1e-6)),
+            1, max_chunks_per_submit);
     }
 }
 
