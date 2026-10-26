@@ -143,6 +143,8 @@ endfunction()
 # pycanha_add_slang_kernel(<name>
 #     SOURCE <kernel.slang>
 #     DEPENDS <module.slang> ...      # Slang emits no depfile: list imports
+#     [DEFINES <NAME[=value]> ...]    # preprocessor defines (spirv: a variant
+#                                     # of a kernel under another <name>)
 #     [TARGET <spirv|metal>])         # default spirv
 #
 # spirv: compiles the kernel to SPIR-V (Vulkan 1.3, scalar block layout,
@@ -161,7 +163,7 @@ endfunction()
 # Either way it creates the custom target pycanha_kernel_<name>; the caller
 # wires it into the library.
 function(pycanha_add_slang_kernel _name)
-    cmake_parse_arguments(PARSE_ARGV 1 _kernel "" "SOURCE;TARGET" "DEPENDS")
+    cmake_parse_arguments(PARSE_ARGV 1 _kernel "" "SOURCE;TARGET" "DEPENDS;DEFINES")
     if(NOT _kernel_SOURCE)
         message(FATAL_ERROR "pycanha_add_slang_kernel: SOURCE is required")
     endif()
@@ -189,11 +191,15 @@ function(pycanha_add_slang_kernel _name)
             "(got ${_kernel_TARGET})")
     endif()
 
+    set(_defines "")
+    foreach(_define IN LISTS _kernel_DEFINES)
+        list(APPEND _defines "-D${_define}")
+    endforeach()
     set(_commands
         COMMAND "${CMAKE_COMMAND}" -E make_directory
                 "${CMAKE_CURRENT_BINARY_DIR}/kernels" "${_embed_dir}"
         COMMAND "${PYCANHA_SLANGC}" "${_kernel_SOURCE}"
-                -I "${_kernel_dir}"
+                -I "${_kernel_dir}" ${_defines}
                 -profile glsl_460
                 -capability spvRayQueryKHR -capability spvInt64Atomics
                 -target spirv -O2 -fvk-use-scalar-layout

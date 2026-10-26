@@ -187,6 +187,13 @@ class SceneImpl {
     void create_pipelines();
     [[nodiscard]] VkPipeline build_compute_pipeline(
         std::span<const std::uint32_t> spirv, const char* what) const;
+    // The pipeline of a kernel for the settings' sampler: `random` as built
+    // by create_pipelines, or the kernel's QMC build (`spirv`, compiled with
+    // PYCANHA_QMC), made into a pipeline on first use.
+    [[nodiscard]] VkPipeline pipeline_for(VkPipeline random, VkPipeline& sobol,
+                                          std::span<const std::uint32_t> spirv,
+                                          const char* what,
+                                          const TraceSettings& settings);
     // Points descriptor `binding` of the scene's set at `buffer`. Only valid
     // while no submitted work uses the set (every dispatch here is waited).
     void write_storage_descriptor(std::uint32_t binding, VkBuffer buffer) const;
@@ -254,6 +261,10 @@ class SceneImpl {
     VkPipeline _vf_pipeline = VK_NULL_HANDLE;
     VkPipeline _exchange_pipeline = VK_NULL_HANDLE;
     VkPipeline _solar_pipeline = VK_NULL_HANDLE;
+    // Sampler::Sobol variants, built on the first trace that asks for them.
+    VkPipeline _vf_pipeline_qmc = VK_NULL_HANDLE;
+    VkPipeline _exchange_pipeline_qmc = VK_NULL_HANDLE;
+    VkPipeline _solar_pipeline_qmc = VK_NULL_HANDLE;
     VkDescriptorPool _descriptor_pool = VK_NULL_HANDLE;
     VkDescriptorSet _descriptor_set = VK_NULL_HANDLE;
 

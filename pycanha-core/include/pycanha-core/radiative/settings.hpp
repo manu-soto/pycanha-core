@@ -4,6 +4,20 @@
 
 namespace pycanha::radiative {
 
+// How each ray's emission point and direction are drawn (vf, exchange and
+// solar kernels; the bounces after the first interaction stay pseudo-random).
+enum class Sampler : std::uint8_t {
+    // Pseudo-random (PCG) — the default, the stream every golden value pins.
+    Random,
+    // Randomised quasi-Monte Carlo: the face point and the direction come from
+    // a 4-D Sobol' sequence (Joe & Kuo direction numbers) indexed by the ray
+    // index, Owen-scrambled per face, dimension and seed (hash-based nested
+    // uniform scrambling). Unbiased; still deterministic and invariant under
+    // chunking, and batches with different seeds are independent
+    // randomisations. Converges faster than Random on exchange integrals.
+    Sobol,
+};
+
 // Monte-Carlo trace control: a fixed ray count plus a seed make every run
 // deterministic and reproducible. Accuracy-targeted convergence is
 // intentionally NOT a C++ concept — the accumulate_* calls are
@@ -21,6 +35,8 @@ struct TraceSettings {
     // Emit along the face normal instead of the cosine-weighted hemisphere
     // (the legacy `_Nodes` debugging mode; vf/exchange kernels only).
     bool normal_emission = false;
+    // Emission sampling (see Sampler).
+    Sampler sampler = Sampler::Random;
 };
 
 // Accumulator buffer layout. Kernels are identical in both layouts and cells

@@ -250,6 +250,46 @@ TEST_CASE("radiative exchange: Russian roulette is threshold-invariant",
     REQUIRE(fine.conservation_error() == 0);
 }
 
+TEST_CASE("radiative exchange: Sobol emission conserves energy and agrees "
+          "with random",
+          "[radiative][gpu][exchange][qmc]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // The cavity of the Russian-roulette test: many bounces after the
+    // Sobol-sampled emission, which stay pseudo-random.
+    const auto model = make_parallel_plates(0.05);
+    const std::array<std::array<float, 6>, 1> rows{gray_row(0.2F)};
+    const std::array<int, 2> pair_rows{0, 0};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+
+    rad::TraceSettings settings;
+    settings.rays_per_face = 10'000;
+    settings.seed = 33;
+    const std::vector<std::uint32_t> emitters{0};
+
+    rad::ExchangeAccumulator random(scene, rad::Band::IR);
+    scene.accumulate_exchange(random, settings, emitters);
+    const rad::ExchangeResult random_result = random.result();
+
+    settings.sampler = rad::Sampler::Sobol;
+    rad::ExchangeAccumulator sobol(scene, rad::Band::IR);
+    scene.accumulate_exchange(sobol, settings, emitters);
+    const rad::ExchangeResult sobol_result = sobol.result();
+
+    const double tolerance = (4.0 * (random_result.stats.max_stderr +
+                                     sobol_result.stats.max_stderr)) +
+                             0.005;
+    REQUIRE(
+        csr_value(sobol_result.factors, 0, 2) ==
+        Catch::Approx(csr_value(random_result.factors, 0, 2)).margin(tolerance));
+    REQUIRE(random.conservation_error() == 0);
+    REQUIRE(sobol.conservation_error() == 0);
+}
+
 TEST_CASE("radiative exchange: inactive faces absorb into the lost bucket",
           "[radiative][gpu][exchange]") {
     if (!rad::is_available()) {

@@ -202,3 +202,89 @@ TEST_CASE("radiative vf: batches accumulate", "[radiative][gpu][vf]") {
     // The explicit space column closes every emitted row exactly.
     REQUIRE(result.row_sums(0) == Catch::Approx(1.0).margin(1e-12));
 }
+
+TEST_CASE("radiative vf: Sobol emission is unbiased and beats random sampling",
+          "[radiative][gpu][vf][qmc]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const auto model = make_parallel_plates(1.0);
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              model->material_table());
+    const double expected = parallel_plates_vf(1.0, 1.0, 1.0);
+    const std::vector<std::uint32_t> emitters{0};
+    constexpr std::uint32_t rays = 1U << 14U;
+    constexpr int seeds = 8;
+
+    // Mean square error over independent seeds (independent scramblings for
+    // Sobol), for each sampler.
+    auto mse = [&](rad::Sampler sampler) {
+        double sum = 0.0;
+        for (int seed = 1; seed <= seeds; ++seed) {
+            rad::VfAccumulator acc(scene);
+            rad::TraceSettings settings;
+            settings.rays_per_face = rays;
+            settings.seed = static_cast<std::uint32_t>(seed);
+            settings.sampler = sampler;
+            scene.accumulate_vf(acc, settings, emitters);
+            const rad::VfResult result = acc.result();
+            const double error = csr_value(result.vf, 0, 2) - expected;
+            sum += error * error;
+            // The space column still closes the row exactly.
+            REQUIRE(result.row_sums(0) == Catch::Approx(1.0).margin(1e-12));
+        }
+        return sum / seeds;
+    };
+    const double binomial_variance = expected * (1.0 - expected) / rays;
+    const double sobol = mse(rad::Sampler::Sobol);
+    const double random = mse(rad::Sampler::Random);
+    // Unbiased: the Sobol RMS error is within the random sampling's spread.
+    REQUIRE(std::sqrt(sobol) < 3.0 * std::sqrt(binomial_variance));
+    // Lower error: at 16k rays on this smooth integrand the scrambled net's
+    // variance is far below the binomial one (about 40x fewer rays for the
+    // same error measured offline); a factor of 4 in variance leaves margin.
+    REQUIRE(sobol < 0.25 * binomial_variance);
+    REQUIRE(random > sobol);
+}
+
+TEST_CASE("radiative vf: Sobol emission is reproducible and seeded",
+          "[radiative][gpu][vf][qmc]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const auto model = make_parallel_plates(1.0);
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              model->material_table());
+
+    rad::TraceSettings settings;
+    settings.rays_per_face = 5'000;
+    settings.seed = 42;
+    settings.sampler = rad::Sampler::Sobol;
+    rad::VfAccumulator first(scene);
+    scene.accumulate_vf(first, settings);
+    const rad::VfResult first_result = first.result();
+    rad::VfAccumulator second(scene);
+    scene.accumulate_vf(second, settings);
+    require_bit_identical(second.result(), first_result);
+
+    // Another seed is another scrambling: a different estimate.
+    settings.seed = 43;
+    rad::VfAccumulator third(scene);
+    scene.accumulate_vf(third, settings);
+    REQUIRE_FALSE(csr_bit_identical(third.result().vf, first_result.vf));
+
+    // The default sampler after a Sobol trace still gives the Random result.
+    settings.seed = 42;
+    settings.sampler = rad::Sampler::Random;
+    rad::VfAccumulator random_after(scene);
+    scene.accumulate_vf(random_after, settings);
+    rad::RadiativeScene fresh(device, model->mesh_parts(),
+                              model->material_table());
+    rad::VfAccumulator random_fresh(fresh);
+    fresh.accumulate_vf(random_fresh, settings);
+    require_bit_identical(random_after.result(), random_fresh.result());
+}

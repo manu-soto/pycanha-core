@@ -52,6 +52,9 @@ public static const uint FLAG_NORMAL_EMISSION = 1u;
 // the IR one. A push-constant flag keeps one exchange pipeline for both
 // bands; the branch is dispatch-uniform, so it costs nothing on the GPU.
 public static const uint FLAG_SOLAR_BAND = 2u;
+// Emission from the scrambled Sobol' sequence instead of the PCG stream
+// (TraceSettings::sampler == Sampler::Sobol). Dispatch-uniform.
+public static const uint FLAG_QMC = 4u;
 
 // ---------------------------------------------------------------------------
 // Shared scene bindings (set 0, bindings 0-9). Kernel-specific accumulator
@@ -139,6 +142,98 @@ public float rng_next(inout Rng r) {
     uint w = ((r.state >> ((r.state >> 28u) + 4u)) ^ r.state) * 277803737u;
     w = (w >> 22u) ^ w;
     return float(w >> 8) * (1.0 / 16777216.0);
+}
+
+// ---------------------------------------------------------------------------
+// Randomised quasi-Monte Carlo emission (FLAG_QMC). A ray's emission uses four
+// numbers: the face point (2) and the direction (2). They come from a 4-D
+// Sobol' sequence indexed by the ray index, each dimension Owen-scrambled with
+// a seed derived from (face, dimension, batch_seed), so the sequence is
+// unbiased, independent between faces and between batches, and — being keyed
+// on the global ray index like the PCG stream — invariant under chunking.
+// Direction numbers: Joe & Kuo (2008), new-joe-kuo-6.21201, dimensions 1-4
+// (checked point by point against scipy.stats.qmc.Sobol). Scrambling: nested
+// uniform (Owen) scrambling by the hash-based method of Burley (2020,
+// "Practical Hash-based Owen Scrambling", JCGT 9(4)) with the improved hash of
+// Vegdahl (2021, "Building a Better LK Hash").
+// ---------------------------------------------------------------------------
+#if defined(PYCANHA_METAL_BACKEND) || defined(PYCANHA_QMC)
+static const uint SOBOL_DIRECTIONS[128] = {
+    // dimension 0 (van der Corput)
+    0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
+    0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
+    0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u,
+    0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u,
+    // dimension 1
+    0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u,
+    0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u,
+    0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u,
+    0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu,
+    // dimension 2
+    0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u,
+    0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u,
+    0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u,
+    0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u,
+    // dimension 3
+    0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u,
+    0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u,
+    0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u,
+    0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u
+};
+
+uint sobol_u32(uint index, uint dim) {
+    uint x = 0u;
+    uint base = dim * 32u;
+    for (uint bit = 0u; index != 0u; index >>= 1u, ++bit) {
+        if ((index & 1u) != 0u) {
+            x ^= SOBOL_DIRECTIONS[base + bit];
+        }
+    }
+    return x;
+}
+
+uint lk_hash(uint x, uint seed) {
+    x ^= x * 0x3d20adeau;
+    x += seed;
+    x *= (seed >> 16u) | 1u;
+    x ^= x * 0x05526c56u;
+    x ^= x * 0x53a22864u;
+    return x;
+}
+
+uint owen_scramble(uint x, uint seed) {
+    return reversebits(lk_hash(reversebits(x), seed));
+}
+
+// Scrambled Sobol' coordinate `dim` (0-3) of ray `ray_index` of `face`, in
+// [0, 1) with a 24-bit mantissa like rng_next.
+public float qmc_sample(uint face, uint ray_index, uint dim) {
+    uint seed = pcg_hash(face ^ pcg_hash(dim + 0x9e3779b9u ^ pcg_hash(pc.batch_seed)));
+    uint x = owen_scramble(sobol_u32(ray_index, dim), seed);
+    return float(x >> 8) * (1.0 / 16777216.0);
+}
+#else
+// The default Vulkan kernels never call it (qmc_mode() is false there); the
+// stub keeps the table and the scrambling out of them whatever the optimizer.
+public float qmc_sample(uint face, uint ray_index, uint dim) {
+    return 0.0;
+}
+#endif
+
+// On Vulkan the sampler is chosen at compile time: every kernel is built twice,
+// the second time with PYCANHA_QMC defined (<kernel>_qmc_spv), and the host
+// picks the build. The default kernels then hold none of the QMC code or its
+// table: as a dispatch-uniform push-constant flag they traced ~5 % slower than
+// main on an RTX 4070, and so did a specialization constant. Metal keeps the
+// flag.
+public bool qmc_mode() {
+#if defined(PYCANHA_METAL_BACKEND)
+    return (pc.flags & FLAG_QMC) != 0u;
+#elif defined(PYCANHA_QMC)
+    return true;
+#else
+    return false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +337,11 @@ public void onb(float3 n, out float3 t, out float3 b) {
 public float3 cosine_hemisphere(float3 n, inout Rng rng) {
     float u1 = rng_next(rng);
     float u2 = rng_next(rng);
+    return cosine_hemisphere_from(n, u1, u2);
+}
+
+// The same map from two given numbers in [0, 1) (the QMC emission's).
+public float3 cosine_hemisphere_from(float3 n, float u1, float u2) {
     float phi = 6.28318530718 * u1;
     float r = sqrt(u2);
     float3 t;
@@ -281,14 +381,24 @@ public struct SurfaceSample {
 };
 
 // Draws u0 (triangle pick) + u1/u2 (barycentric point) — the first three
-// draws of the frozen emission order.
-public SurfaceSample sample_face_point(uint face, inout Rng rng) {
+// draws of the frozen emission order. In QMC mode (FLAG_QMC) no draw is taken:
+// Sobol' dimension 0 picks the triangle and, rescaled to its slice of the
+// cumulative area, gives the first barycentric number; dimension 1 the second.
+// That keeps the face point a 2-D low-discrepancy sample over the whole face.
+public SurfaceSample sample_face_point(uint face, uint ray_index, inout Rng rng) {
     uint pair_base = face & ~1u;  // even side-1 face of the pair
+    bool qmc = qmc_mode();
 
     // 1. Area-weighted triangle pick: binary search u0 in the face's
     //    cumulative-area table (normalized to 1.0 at the last triangle).
-    float u0 = rng_next(rng);
-    uint lo = emit_tri_offset[pair_base];
+    float u0;
+    if (qmc) {
+        u0 = qmc_sample(face, ray_index, 0u);
+    } else {
+        u0 = rng_next(rng);
+    }
+    uint first = emit_tri_offset[pair_base];
+    uint lo = first;
     uint hi = emit_tri_offset[pair_base + 1u];  // one past the last triangle
     while (lo + 1u < hi) {
         uint mid = (lo + hi) / 2u;
@@ -310,8 +420,17 @@ public SurfaceSample sample_face_point(uint face, inout Rng rng) {
     float3 v2 = vertices[tri.z];
 
     // 2. Uniform barycentric point (sqrt trick, 2 draws).
-    float u1 = rng_next(rng);
-    float u2 = rng_next(rng);
+    float u1;
+    float u2;
+    if (qmc) {
+        float c_lo = lo == first ? 0.0 : emit_cum_area[lo - 1u];
+        float c_hi = min(emit_cum_area[lo], 1.0);
+        u1 = clamp((u0 - c_lo) / max(c_hi - c_lo, 1e-30), 0.0, 0.99999994);
+        u2 = qmc_sample(face, ray_index, 1u);
+    } else {
+        u1 = rng_next(rng);
+        u2 = rng_next(rng);
+    }
     float s = sqrt(u1);
     float b0 = 1.0 - s;
     float b1 = s * (1.0 - u2);
@@ -333,13 +452,17 @@ public SurfaceSample sample_face_point(uint face, inout Rng rng) {
     return sample;
 }
 
-public EmittedRay emit_from_face(uint face, inout Rng rng) {
-    SurfaceSample sample = sample_face_point(face, rng);
+public EmittedRay emit_from_face(uint face, uint ray_index, inout Rng rng) {
+    SurfaceSample sample = sample_face_point(face, ray_index, rng);
 
-    // 4. Direction: cosine hemisphere (2 draws) or the normal itself.
+    // 4. Direction: cosine hemisphere (2 draws, or Sobol' dimensions 2-3 in
+    //    QMC mode) or the normal itself.
     float3 dir;
     if ((pc.flags & FLAG_NORMAL_EMISSION) != 0u) {
         dir = sample.normal;
+    } else if (qmc_mode()) {
+        dir = cosine_hemisphere_from(sample.normal, qmc_sample(face, ray_index, 2u),
+                                     qmc_sample(face, ray_index, 3u));
     } else {
         dir = cosine_hemisphere(sample.normal, rng);
     }

@@ -31,7 +31,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     uint row = face - pc.row_offset;  // block-relative accumulator row
     uint stride = pc.num_faces + 3u;
 
-    EmittedRay ray = emit_from_face(face, rng);
+    EmittedRay ray = emit_from_face(face, ray_index, rng);
     Hit hit = trace_ray(ray.origin, ray.direction);
     uint col = hit.miss ? pc.num_faces : hit.face;
     InterlockedAdd(acc[row * stride + col], 1u);
