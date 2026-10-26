@@ -38,6 +38,15 @@ class SteadyStateSolver : public Solver {
     /// Cholesky is chosen with DirectSolverType::LDLT instead.
     bool allow_cholesky = true;
 
+    /// Solve each pass for the temperature change, A dT = b - A T, instead of
+    /// the temperatures, A T = b. The same equations, so a direct solve gives
+    /// the same answer to rounding. With the iterative step of SSLU_CGS its
+    /// relative tolerance (pardiso_iparm_3) then bounds the error of the
+    /// change, which shrinks as the passes converge, instead of the error of
+    /// the temperatures: a looser tolerance, fewer CGS iterations a pass, and
+    /// still the direct solver's answer.
+    bool correction_form = true;
+
     /// The last initialize() chose a Cholesky-type factorisation.
     [[nodiscard]] bool uses_cholesky() const noexcept { return _symmetric; }
     /// Numerical factorisations done by the last solve().

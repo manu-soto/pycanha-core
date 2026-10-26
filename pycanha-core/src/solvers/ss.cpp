@@ -320,13 +320,26 @@ void SteadyStateSolver::solve_linearised() {
         }
         assemble_matrix();
         assemble_rhs();
+        if (correction_form) {
+            // A dT = b - A T: the same pass, solved for the change
+            if (_symmetric) {
+                _b.noalias() -= _a_matrix.selfadjointView<Eigen::Upper>() * Td;
+            } else {
+                _b.noalias() -= _a_matrix * Td;
+            }
+        }
 
         if (!factorize_and_solve_step()) {
             return;
         }
 
-        dTd = Td_solver - Td;
-        Td = Td_solver;
+        if (correction_form) {
+            dTd = Td_solver;
+            Td += dTd;
+        } else {
+            dTd = Td_solver - Td;
+            Td = Td_solver;
+        }
         max_dT = dTd.cwiseAbs().maxCoeff();
 
         this->callback_solver_loop();
