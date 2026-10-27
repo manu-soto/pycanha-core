@@ -54,10 +54,10 @@ constexpr auto readback_usage =
 
 // Merges one Tiled block (the read-back cells of the block's emitter rows)
 // into the host rows. Each emitter adds only into its own host row, so the
-// rows merge in parallel without changing any sum; each row is reserved for
-// the block's non-zeros first so its map is not rehashed while it fills. On
-// large scenes this merge, run on one thread, was nearly all of a trace's
-// time while the GPU sat idle.
+// rows merge in parallel without changing any sum (cells add with wrap: the
+// exchange lost column may carry negative, wrapped, Russian-roulette
+// adjustments). On large scenes this merge, run on one thread, was nearly
+// all of a trace's time while the GPU sat idle.
 template <typename Cell>
 void merge_block_rows(std::span<const Cell> scratch, std::size_t cols,
                       std::span<const std::uint32_t> block_emitters,
@@ -67,19 +67,8 @@ void merge_block_rows(std::span<const Cell> scratch, std::size_t cols,
         {}, block_emitters.size(), block_emitters.size() * cols);
     parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
         const std::uint32_t face = block_emitters[index];
-        const std::span<const Cell> cells = scratch.subspan(
-            static_cast<std::size_t>(face - row_offset) * cols, cols);
-        auto& host_row = host_rows[face];
-        host_row.reserve(host_row.size() +
-                         static_cast<std::size_t>(std::ranges::count_if(
-                             cells, [](Cell cell) { return cell != 0; })));
-        for (std::size_t col = 0; col < cols; ++col) {
-            if (cells[col] != 0) {
-                // Cells add with wrap: the exchange lost column may carry
-                // negative (wrapped) Russian-roulette adjustments.
-                host_row[static_cast<std::uint32_t>(col)] += cells[col];
-            }
-        }
+        host_rows[face].add_dense(scratch.subspan(
+            static_cast<std::size_t>(face - row_offset) * cols, cols));
     });
 }
 

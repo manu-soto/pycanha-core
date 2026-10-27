@@ -32,6 +32,7 @@
 #include <span>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pycanha-core/radiative/results.hpp"
@@ -40,8 +41,99 @@
 
 namespace pycanha::radiative::detail {
 
-// Tiled-layout row storage: accumulated column -> cell for one matrix row.
-using HostCountRow = std::unordered_map<std::uint32_t, std::uint64_t>;
+// Tiled-layout row storage: the accumulated (column, cell) pairs of one
+// matrix row, kept sorted by column. A sorted array rather than a hash map:
+// a block's cells arrive in column order, so a new row is an append and a
+// row an earlier batch filled is a linear merge, and the row is freed as one
+// allocation. The hash map paid an allocation per entry on insert and a free
+// per entry on destruction — minutes for the 2.6e8 entries of a 107 k-face
+// scene. operator[] and erase keep the map-like use of the tests and of the
+// Metal path; iteration yields (column, cell) pairs like the map's.
+class HostCountRow {
+  public:
+    using value_type = std::pair<std::uint32_t, std::uint64_t>;
+
+    [[nodiscard]] auto begin() const noexcept { return _entries.begin(); }
+    [[nodiscard]] auto end() const noexcept { return _entries.end(); }
+    [[nodiscard]] std::size_t size() const noexcept { return _entries.size(); }
+    [[nodiscard]] bool empty() const noexcept { return _entries.empty(); }
+    // Releases the storage, as clearing the map freed its nodes.
+    void clear() noexcept { std::vector<value_type>().swap(_entries); }
+    void reserve(std::size_t entries) { _entries.reserve(entries); }
+
+    // The cell of `column`, inserted as 0 when absent (the order is kept).
+    std::uint64_t& operator[](std::uint32_t column) {
+        auto it = lower(column);
+        if (it == _entries.end() || it->first != column) {
+            it = _entries.insert(it, value_type{column, 0});
+        }
+        return it->second;
+    }
+    void erase(std::uint32_t column) {
+        const auto it = lower(column);
+        if (it != _entries.end() && it->first == column) {
+            _entries.erase(it);
+        }
+    }
+
+    // Adds a dense row's non-zero cells (index = column) with wrap, as the
+    // map's += did: an entry an earlier batch made stays even if the sum
+    // wraps to 0, and a zero cell adds nothing.
+    template <typename Cell>
+    void add_dense(std::span<const Cell> cells) {
+        std::size_t nonzero = 0;
+        for (const Cell cell : cells) {
+            nonzero += cell != 0 ? 1U : 0U;
+        }
+        if (nonzero == 0) {
+            return;
+        }
+        if (_entries.empty()) {
+            _entries.reserve(nonzero);
+            for (std::size_t col = 0; col < cells.size(); ++col) {
+                if (cells[col] != 0) {
+                    _entries.emplace_back(static_cast<std::uint32_t>(col),
+                                          static_cast<std::uint64_t>(cells[col]));
+                }
+            }
+            return;
+        }
+        std::vector<value_type> merged;
+        merged.reserve(_entries.size() + nonzero);
+        auto it = _entries.begin();
+        for (std::size_t col = 0; col < cells.size(); ++col) {
+            if (cells[col] == 0) {
+                continue;
+            }
+            const auto column = static_cast<std::uint32_t>(col);
+            while (it != _entries.end() && it->first < column) {
+                merged.push_back(*it++);
+            }
+            if (it != _entries.end() && it->first == column) {
+                merged.emplace_back(
+                    column, it->second + static_cast<std::uint64_t>(cells[col]));
+                ++it;
+            } else {
+                merged.emplace_back(column,
+                                    static_cast<std::uint64_t>(cells[col]));
+            }
+        }
+        merged.insert(merged.end(), it, _entries.end());
+        _entries.swap(merged);
+    }
+
+  private:
+    [[nodiscard]] std::vector<value_type>::iterator lower(
+        std::uint32_t column) {
+        return std::lower_bound(
+            _entries.begin(), _entries.end(), column,
+            [](const value_type& entry, std::uint32_t c) {
+                return entry.first < c;
+            });
+    }
+
+    std::vector<value_type> _entries;
+};
 
 // Matrix row stride: the real face columns plus the virtual
 // space/inactive/lost bucket columns.

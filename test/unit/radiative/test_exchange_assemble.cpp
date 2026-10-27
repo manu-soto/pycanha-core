@@ -700,3 +700,31 @@ TEST_CASE("radiative exchange assemble: a zero-emissivity row is unconstrained",
     const rad::ExchangeResult projected = cells.dense(config);
     REQUIRE_FALSE(rad::SparseMatrix::InnerIterator(projected.factors, 3));
 }
+
+TEST_CASE("radiative tiled host rows: sorted merges match the map semantics",
+          "[radiative][assembly]") {
+    detail::HostCountRow row;
+    // A new row: the block's non-zeros in column order.
+    const std::vector<std::uint64_t> first{0, 5, 0, 7, 0, 1};
+    row.add_dense(std::span<const std::uint64_t>(first));
+    REQUIRE(row.size() == 3);
+    // A second batch: adds to columns 1 and 5, inserts 0 and 4, and wraps
+    // column 3 to zero (the entry stays, as the map's += left it).
+    const std::vector<std::uint64_t> second{2, 1, 0, ~std::uint64_t{6}, 4, 9};
+    row.add_dense(std::span<const std::uint64_t>(second));
+    const std::vector<detail::HostCountRow::value_type> expected{
+        {0, 2}, {1, 6}, {3, 0}, {4, 4}, {5, 10}};
+    REQUIRE(std::vector<detail::HostCountRow::value_type>(row.begin(),
+                                                           row.end()) ==
+            expected);
+    // u32 cells (the view-factor counts) and the map-like operations.
+    const std::vector<std::uint32_t> counts{0, 0, 3};
+    row.add_dense(std::span<const std::uint32_t>(counts));
+    REQUIRE(row[2] == 3);
+    row[7] += 1;
+    row.erase(0);
+    REQUIRE(row.size() == 6);
+    REQUIRE(row.begin()->first == 1);
+    row.clear();
+    REQUIRE(row.empty());
+}
