@@ -12,10 +12,12 @@
 #include "pycanha-core/gmm/geometrymodel.hpp"
 #include "pycanha-core/gmm/mesh/thermal_mesh.hpp"
 #include "pycanha-core/gmm/mesh/trimesh.hpp"
+#include "pycanha-core/gmm/primitives/cube.hpp"
 #include "pycanha-core/gmm/primitives/rectangle.hpp"
 #include "pycanha-core/gmm/scene/coordinate_transformation.hpp"
 #include "pycanha-core/gmm/scene/geometry.hpp"
 #include "pycanha-core/gmm/scene/geometry_group.hpp"
+#include "pycanha-core/gmm/scene/geometry_group_cutted.hpp"
 #include "pycanha-core/gmm/scene/geometry_item.hpp"
 #include "pycanha-core/radiative/scene_part.hpp"
 
@@ -188,4 +190,61 @@ TEST_CASE("mesh_parts: item as split target", "[gmm][parts]") {
                 .transform.apply({0.0, 0.0, 0.0})
                 .isApprox(pycanha::Point3D{2.0, 0.0, 0.0}));
     REQUIRE(parts[1].mesh.vertices.col(0).maxCoeff() <= 1.0F + 1e-6F);
+}
+
+TEST_CASE("mesh_parts: cut items mesh the same as the model mesh",
+          "[gmm][parts][cutting]") {
+    // Many cut groups, so their cuts run across workers, between uncut
+    // panels, inside and outside a split group: the parts must still hold the
+    // model mesh's own triangles, bit for bit, whichever worker made them.
+    using pycanha::gmm::Cube;
+    using pycanha::gmm::GeometryGroupCutted;
+    constexpr int cut_groups = 24;
+    GeometryModel model("scene");
+    std::vector<std::shared_ptr<pycanha::gmm::Geometry>> wing_members;
+    for (int index = 0; index < cut_groups; ++index) {
+        const double z = static_cast<double>(index);
+        ThermalMesh thermal_mesh{{0.0, 0.25, 0.5, 0.75, 1.0},
+                                 {0.0, 0.25, 0.5, 0.75, 1.0}};
+        auto plate = std::make_shared<GeometryItem>(
+            "plate_" + std::to_string(index),
+            Rectangle({0.0, 0.0, z}, {1.0, 0.0, z}, {0.0, 1.0, z}),
+            std::move(thermal_mesh));
+        const double offset = 0.05 * static_cast<double>(index % 7);
+        auto cutter = std::make_shared<GeometryItem>(
+            "cutter_" + std::to_string(index),
+            Cube({0.3 + offset, 0.4, z}, {0.35, 0.3, 0.5}), ThermalMesh{});
+        auto cut = std::make_shared<GeometryGroupCutted>(
+            "cut_" + std::to_string(index),
+            std::vector<std::shared_ptr<pycanha::gmm::Geometry>>{plate},
+            std::vector<std::shared_ptr<GeometryItem>>{cutter});
+        if (index % 3 == 0) {
+            wing_members.push_back(cut);
+        } else {
+            model.add(cut);
+        }
+        model.add(make_panel(
+            "panel_" + std::to_string(index),
+            CoordinateTransformation::from_translation({2.0, 0.0, z})));
+    }
+    model.add(std::make_shared<GeometryGroup>("wing", wing_members));
+
+    const TriMeshF& full = model.mesh();
+    const auto parts = model.mesh_parts();
+    REQUIRE(parts.size() == 1);
+    REQUIRE(parts[0].mesh.vertices.rows() == full.vertices.rows());
+    REQUIRE(parts[0].mesh.triangles.rows() == full.triangles.rows());
+    REQUIRE(parts[0].mesh.vertices.cwiseEqual(full.vertices).all());
+    REQUIRE(parts[0].mesh.triangles.cwiseEqual(full.triangles).all());
+    REQUIRE(parts[0].mesh.face_ids.cwiseEqual(full.face_ids).all());
+
+    // Split off the group: the two parts partition the same faces.
+    const std::vector<std::string> split{"wing"};
+    const auto split_parts = model.mesh_parts(split);
+    REQUIRE(split_parts.size() == 2);
+    std::vector<pycanha::MeshIndex> ids = sorted_face_ids(split_parts[0].mesh);
+    const auto wing_ids = sorted_face_ids(split_parts[1].mesh);
+    ids.insert(ids.end(), wing_ids.begin(), wing_ids.end());
+    std::ranges::sort(ids);
+    REQUIRE(ids == sorted_face_ids(full));
 }

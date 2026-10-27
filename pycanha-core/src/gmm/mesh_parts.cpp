@@ -12,6 +12,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,6 +29,7 @@
 #include "pycanha-core/radiative/materials.hpp"
 #include "pycanha-core/radiative/scene_part.hpp"
 #include "pycanha-core/utils/logger.hpp"
+#include "pycanha-core/utils/parallel_for.hpp"
 
 namespace pycanha::gmm {
 
@@ -95,14 +97,39 @@ std::vector<radiative::ScenePart> GeometryModel::mesh_parts(
     const auto targets =
         detail::collect_targets(*_root, _root->transform(), frame_breaks);
 
+    // Meshed as resolve_subtree() meshes the model: an uncut item fills its
+    // cached mesh, which mutates the item, so those stay on this thread; the
+    // boolean cuts, where the time goes, run across workers, each writing only
+    // its own piece, so the worker count cannot change the result.
+    std::vector<TriMeshD> meshes(targets.size());
+    std::vector<std::size_t> cut_targets;
+    for (std::size_t index = 0; index < targets.size(); ++index) {
+        if (targets[index].cutters.empty()) {
+            meshes[index] = detail::mesh_target(targets[index]);
+        } else {
+            cut_targets.push_back(index);
+        }
+    }
+    const unsigned workers =
+        cut_targets.size() > 1U
+            ? std::min<unsigned>(std::thread::hardware_concurrency(),
+                                 static_cast<unsigned>(cut_targets.size()))
+            : 1U;
+    utils::parallel_for_index(
+        cut_targets.size(), workers, [&](std::size_t index) {
+            meshes[cut_targets[index]] =
+                detail::mesh_target(targets[cut_targets[index]]);
+        });
+
     pycanha::MeshIndex face_offset = 0;
-    for (const auto& target : targets) {
+    for (std::size_t index = 0; index < targets.size(); ++index) {
+        const auto& target = targets[index];
         PartBuild& part = parts[target.part];
         part.encountered = true;
         part.transform = target.part_to_root;
         report_cross_part_cutters(target);
 
-        part.pieces.push_back(detail::mesh_target(target));
+        part.pieces.push_back(std::move(meshes[index]));
         part.face_offsets.push_back(face_offset);
         face_offset += part.pieces.back().nf();
     }
