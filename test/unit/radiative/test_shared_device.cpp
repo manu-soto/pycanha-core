@@ -60,10 +60,9 @@ constexpr std::size_t fin_cells = 10;
         for (std::size_t j = 0; j < fins_per_side; ++j) {
             const double x0 = (static_cast<double>(i) + 0.25) * step;
             const double y0 = (static_cast<double>(j) + 0.2) * step;
-            const double angle = 0.6 *
-                                 (static_cast<double>(i) -
-                                  static_cast<double>(j)) /
-                                 static_cast<double>(fins_per_side);
+            const double angle =
+                0.6 * (static_cast<double>(i) - static_cast<double>(j)) /
+                static_cast<double>(fins_per_side);
             const double dx = 0.5 * step * std::cos(angle);
             const double dy = 0.5 * step * std::sin(angle);
             model->add(std::make_shared<GeometryItem>(

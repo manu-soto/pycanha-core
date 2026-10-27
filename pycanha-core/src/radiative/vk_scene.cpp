@@ -202,11 +202,10 @@ GpuBuffer SceneImpl::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     // neighbors (emitter lists, per-face tables) would otherwise leave
     // follow-up allocations on such offsets.
     constexpr VkDeviceSize min_alignment = 16;
-    check(vmaCreateBufferWithAlignment(_device.allocator, &buffer_info,
-                                       &alloc_info,
-                                       std::max(min_alignment, alignment),
-                                       &out.buffer, &out.allocation,
-                                       &result_info),
+    check(vmaCreateBufferWithAlignment(
+              _device.allocator, &buffer_info, &alloc_info,
+              std::max(min_alignment, alignment), &out.buffer, &out.allocation,
+              &result_info),
           "buffer allocation");
     out.mapped = result_info.pMappedData;
     _allocated_bytes += size;
@@ -710,9 +709,9 @@ void SceneImpl::build_blas(const std::vector<ScenePart>& parts) {
         gpu.blas_storage =
             create_buffer(sizes.accelerationStructureSize, accel_storage_usage,
                           BufferMemory::DeviceLocal);
-        GpuBuffer scratch = create_buffer(sizes.buildScratchSize, scratch_usage,
-                                          BufferMemory::DeviceLocal,
-                                          _device.scratch_alignment);
+        GpuBuffer scratch =
+            create_buffer(sizes.buildScratchSize, scratch_usage,
+                          BufferMemory::DeviceLocal, _device.scratch_alignment);
 
         VkAccelerationStructureCreateInfoKHR create{};
         create.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
