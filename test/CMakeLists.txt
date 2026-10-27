@@ -56,6 +56,7 @@ set(UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_gebhart.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_planet.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_rng_golden.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_shared_device.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_solar_kernel.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_types.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_vf_analytic.cpp"
