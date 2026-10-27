@@ -288,3 +288,35 @@ TEST_CASE("radiative vf: Sobol emission is reproducible and seeded",
     fresh.accumulate_vf(random_fresh, settings);
     require_bit_identical(random_after.result(), random_fresh.result());
 }
+
+TEST_CASE("radiative vf: robust offset keeps a 50 um gap closed",
+          "[radiative][gpu][vf][robust_offset]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // Two unit plates 50 um apart. The scene-scaled epsilon (1e-4 of the
+    // 1.41 m diagonal = 141 um) starts every ray beyond plate B, so plate A
+    // sees space; the ULP offset (15 um here) keeps B in front of A.
+    const double gap = 5e-5;
+    const auto model = make_parallel_plates(gap);
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              model->material_table());
+    const std::vector<std::uint32_t> emitters{0};
+    const double expected = parallel_plates_vf(1.0, 1.0, gap);
+
+    rad::TraceSettings settings;
+    settings.rays_per_face = 20'000;
+    settings.seed = 7;
+    settings.robust_offset = true;
+    rad::VfAccumulator robust(scene);
+    scene.accumulate_vf(robust, settings, emitters);
+    const double vf = csr_value(robust.result().vf, 0, 2);
+    REQUIRE(vf == Catch::Approx(expected).margin(1e-3));
+
+    settings.robust_offset = false;
+    rad::VfAccumulator scaled(scene);
+    scene.accumulate_vf(scaled, settings, emitters);
+    REQUIRE(csr_value(scaled.result().vf, 0, 2) < 0.01);
+}

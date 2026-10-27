@@ -60,6 +60,12 @@ struct TraceSettings {
     Sampler sampler = Sampler::Random;
     // Solar ray origin (see SolarSource); the other kernels ignore it.
     SolarSource solar_source = SolarSource::FaceSamples;
+    // Rays leave a surface by a fixed number of float ULPs of the point
+    // (Wächter & Binder 2019; ~15 um at 1 m) instead of an epsilon of 1e-4
+    // of the scene's diagonal (0.15-0.2 mm on a 1.5 m spacecraft), through
+    // which rays leaked past sub-millimetre features. Off by default: the
+    // golden values pin the scaled epsilon.
+    bool robust_offset = false;
 };
 
 // Accumulator buffer layout. Kernels are identical in both layouts and cells

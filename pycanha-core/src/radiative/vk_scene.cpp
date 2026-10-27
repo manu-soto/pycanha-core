@@ -59,9 +59,13 @@ constexpr std::uint32_t flag_solar_band = 2;
 constexpr std::uint32_t flag_qmc = 4;
 constexpr std::uint32_t flag_sun_plane = 8;
 constexpr std::uint32_t flag_scene_has_planet = 16;
+constexpr std::uint32_t flag_robust_offset = 32;
 
+// The per-dispatch flags every kernel takes from the settings: the sampler
+// and the ray-origin offset.
 std::uint32_t sampler_flags(const TraceSettings& settings) {
-    return settings.sampler == Sampler::Sobol ? flag_qmc : 0U;
+    return (settings.sampler == Sampler::Sobol ? flag_qmc : 0U) |
+           (settings.robust_offset ? flag_robust_offset : 0U);
 }
 
 // Tolerated float slack when validating that absorptivity + specular +

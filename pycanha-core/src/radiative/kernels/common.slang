@@ -74,6 +74,9 @@ public static const uint FLAG_SUN_PLANE = 8u;
 // Solar kernel, sun plane: the scene holds a planet part, so each ray first
 // checks that the sun is not eclipsed upstream of the plane.
 public static const uint FLAG_SCENE_HAS_PLANET = 16u;
+// Every kernel: rays leave surfaces by offset_robust (TraceSettings::
+// robust_offset) instead of the scene-scaled epsilon. Dispatch-uniform.
+public static const uint FLAG_ROBUST_OFFSET = 32u;
 
 // ---------------------------------------------------------------------------
 // Shared scene bindings (set 0, bindings 0-9). Kernel-specific accumulator
@@ -406,13 +409,39 @@ public float3 cosine_hemisphere_from(float3 n, float u1, float u2) {
                      n * sqrt(max(1.0 - u2, 0.0)));
 }
 
+// TraceSettings::robust_offset: Wächter & Binder, "A Fast and Robust Method
+// for Avoiding Self-Intersection" (Ray Tracing Gems, 2019, ch. 6). Each
+// coordinate moves along the normal by a fixed number of its own float ULPs
+// (an integer add to its bits), near the origin by a fixed distance, so the
+// offset follows the coordinate's precision — about 15 um at 1 m — and not
+// the scene's extent, which made the scaled epsilon above 0.15-0.2 mm on a
+// 1.5 m spacecraft: rays then started past sub-millimetre features (thin
+// parts, gaps, neighbouring shells) and leaked through them.
+public float3 offset_robust(float3 p, float3 n) {
+    const float origin = 1.0 / 32.0;
+    const float float_scale = 1.0 / 65536.0;
+    const float int_scale = 256.0;
+    int3 of_i = int3(int(int_scale * n.x), int(int_scale * n.y),
+                     int(int_scale * n.z));
+    float3 p_i = float3(asfloat(asint(p.x) + ((p.x < 0.0) ? -of_i.x : of_i.x)),
+                        asfloat(asint(p.y) + ((p.y < 0.0) ? -of_i.y : of_i.y)),
+                        asfloat(asint(p.z) + ((p.z < 0.0) ? -of_i.z : of_i.z)));
+    return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
+                  abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+                  abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+}
+
 // Self-intersection avoidance: rays start at the hit point pushed out along
 // the geometric normal by an epsilon that scales with the distance from the
 // origin, so it works both at spacecraft scale (meters) and at
-// planet-distance scale (1e7 m) where float32 positions are coarse.
-// TODO(radiative): if validation scenes show light leaks on thin geometry,
-// upgrade to an adaptive integer-offset scheme.
+// planet-distance scale (1e7 m) where float32 positions are coarse. The
+// epsilon is 1e-4 of the scene's diagonal: thin geometry leaks through it
+// (light leaks were the TODO here), so TraceSettings::robust_offset selects
+// offset_robust instead.
 public float3 offset_origin(float3 hit_p, float3 n_geom) {
+    if ((pc.flags & FLAG_ROBUST_OFFSET) != 0u) {
+        return offset_robust(hit_p, n_geom);
+    }
     float eps = pc.ray_tmin_scale * max(1.0, length(hit_p));
     return hit_p + n_geom * eps;
 }
