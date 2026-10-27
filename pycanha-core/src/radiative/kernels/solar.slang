@@ -79,8 +79,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         return;  // this side faces away from the sun
     }
     float3 origin = offset_origin(sample.position, sample.normal);
-    Hit shadow = trace_ray(origin, -sun_dir);
-    if (!shadow.miss) {
+    if (occluded(origin, -sun_dir)) {
         return;  // occluded by other geometry (or eclipsed by the planet)
     }
 

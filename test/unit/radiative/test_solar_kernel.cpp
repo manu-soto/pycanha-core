@@ -2,9 +2,11 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstddef>
 #include <memory>
 #include <numbers>
 #include <stdexcept>
+#include <string>
 
 #include "pycanha-core/gmm/geometrymodel.hpp"
 #include "pycanha-core/gmm/mesh/thermal_mesh.hpp"
@@ -140,6 +142,58 @@ TEST_CASE("radiative solar: occlusion shadows completely",
     REQUIRE(result.direct(3) ==
             Catch::Approx(solar_constant).margin(1e-3 * solar_constant));
     REQUIRE(result.direct(2) == 0.0);
+}
+
+TEST_CASE("radiative solar: overlapping occluders shade their union",
+          "[radiative][gpu][solar]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // A unit plate at z = 0 under a sun from +z, and above it three strips
+    // across it that overlap: x in [0, 0.5] at z = 1, [0.25, 0.75] at z = 2
+    // and [0.1, 0.4] at z = 3. A shadow ray from x < 0.75 meets one to three
+    // of them; the plate keeps its sun on x in [0.75, 1] only.
+    using pycanha::gmm::GeometryItem;
+    using pycanha::gmm::Rectangle;
+    using pycanha::gmm::ThermalMesh;
+    auto model = std::make_unique<pycanha::gmm::GeometryModel>("stack");
+    model->add(std::make_shared<GeometryItem>(
+        "plate", Rectangle({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}),
+        ThermalMesh{}));
+    const std::array<std::array<double, 3>, 3> strips{
+        {{0.0, 0.5, 1.0}, {0.25, 0.75, 2.0}, {0.1, 0.4, 3.0}}};
+    for (std::size_t index = 0; index < strips.size(); ++index) {
+        const auto& [x0, x1, z] = strips.at(index);
+        model->add(std::make_shared<GeometryItem>(
+            "strip_" + std::to_string(index),
+            Rectangle({x0, -0.5, z}, {x1, -0.5, z}, {x0, 1.5, z}),
+            ThermalMesh{}));
+    }
+    const std::array<std::array<float, 6>, 1> rows{gray_row(1.0F)};
+    const std::array<int, 4> pair_rows{0, 0, 0, 0};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+
+    const rad::SolarState sun{.direction = {0.0, 0.0, -1.0},
+                              .irradiance = solar_constant};
+    rad::TraceSettings settings;
+    settings.rays_per_face = 20'000;
+    settings.seed = 5;
+    rad::SolarAccumulator acc(scene);
+    scene.accumulate_solar(sun, acc, settings);
+    const rad::SolarResult result = acc.result();
+
+    const double expected = 0.25 * solar_constant;
+    const double sigma =
+        solar_constant *
+        std::sqrt(0.25 * 0.75 / static_cast<double>(settings.rays_per_face));
+    REQUIRE(result.direct(0) == Catch::Approx(expected).margin(5.0 * sigma));
+    // The top strip is in full sun; the plate's underside never sees it.
+    REQUIRE(result.direct(6) == Catch::Approx(0.3 * 2.0 * solar_constant)
+                                    .margin(1e-3 * 0.6 * solar_constant));
+    REQUIRE(result.direct(1) == 0.0);
 }
 
 TEST_CASE("radiative solar: mirrors add a reflected component",

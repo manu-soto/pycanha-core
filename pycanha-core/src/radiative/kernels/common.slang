@@ -580,3 +580,28 @@ public Hit trace_ray(float3 origin, float3 direction) {
     hit.normal = dot(n, direction) < 0.0 ? n : -n;
     return hit;
 }
+
+// Shadow test: whether the ray meets any surface. Only hit or miss is needed,
+// so the first intersection found ends the traversal instead of the search
+// for the closest one; a ray that meets nothing costs the same. The answer is
+// trace_ray's (!miss) exactly: both commit a hit when any opaque triangle lies
+// in [TMin, TMax].
+public bool occluded(float3 origin, float3 direction) {
+#if defined(PYCANHA_METAL_BACKEND)
+    return !trace_ray(origin, direction).miss;
+#else
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.0;
+    ray.TMax = 3.4e38;
+
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH>
+        q;
+    q.TraceRayInline(
+        tlas, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+        0xFF, ray);
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+#endif
+}
