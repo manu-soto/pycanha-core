@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "pycanha-core/gmm/geometrymodel.hpp"
+#include "pycanha-core/gmm/mesh/mesh_options.hpp"
 #include "pycanha-core/gmm/mesh/thermal_mesh.hpp"
 #include "pycanha-core/gmm/primitives/rectangle.hpp"
 #include "pycanha-core/gmm/primitives/sphere.hpp"
@@ -126,4 +127,73 @@ TEST_CASE("radiative planet: a celestial part blocks, scores and never emits",
     }
     REQUIRE(vf_to_planet / scene.face_areas()[0] ==
             Catch::Approx(to_planet).margin(0.01));
+}
+
+TEST_CASE("radiative planet: sunlight keeps its cosine beside a planet",
+          "[radiative][gpu][solar]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // Two black unit plates, one facing +x (faces 0/1) and one facing +z
+    // (faces 2/3), and an Earth-sized planet 700 km below them, split into a
+    // celestial part. The sun is 30 degrees above +x, towards +z.
+    using pycanha::gmm::GeometryGroup;
+    using pycanha::gmm::GeometryItem;
+    using pycanha::gmm::Rectangle;
+    using pycanha::gmm::Sphere;
+    using pycanha::gmm::ThermalMesh;
+    constexpr double earth_radius = 6.378e6;
+    constexpr double altitude = 7.0e5;
+    pycanha::gmm::GeometryModel model("sunlit");
+    model.add(std::make_shared<GeometryItem>(
+        "plus_x",
+        Rectangle({0.5, -0.5, -0.5}, {0.5, 0.5, -0.5}, {0.5, -0.5, 0.5}),
+        ThermalMesh{}));
+    model.add(std::make_shared<GeometryItem>(
+        "plus_z",
+        Rectangle({2.0, -0.5, 0.0}, {3.0, -0.5, 0.0}, {2.0, 0.5, 0.0}),
+        ThermalMesh{}));
+    const double center_z = -(earth_radius + altitude);
+    auto planet = std::make_shared<GeometryItem>(
+        "planet_sphere",
+        Sphere({0.0, 0.0, center_z}, {0.0, 0.0, center_z + 1.0},
+               {1.0, 0.0, center_z}, earth_radius, -earth_radius, earth_radius,
+               0.0, 2.0 * std::numbers::pi),
+        ThermalMesh{});
+    // Faceted to 20 km: a few thousand triangles.
+    planet->set_mesh_options_override(
+        pycanha::gmm::MeshOptions{.deviation_tolerance = 2.0e4});
+    model.add(std::make_shared<GeometryGroup>("planet"));
+    model.add(planet, "planet");
+    const std::vector<std::string> split{"planet"};
+    std::vector<rad::ScenePart> parts = model.mesh_parts(split);
+    REQUIRE(parts.size() == 2);
+    parts[1].kind = rad::PartKind::CelestialBody;
+
+    const auto num_pairs = static_cast<std::size_t>(model.mesh().nf()) / 2;
+    const std::array<std::array<float, 6>, 1> rows{gray_row(1.0F)};
+    const std::vector<int> pair_rows(num_pairs, 0);
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, std::move(parts),
+                              make_materials(rows, pair_rows));
+
+    constexpr double irradiance = 1000.0;
+    const double elevation = std::numbers::pi / 6.0;
+    const rad::SolarState sun{
+        .direction = {-std::cos(elevation), 0.0, -std::sin(elevation)},
+        .irradiance = irradiance};
+    rad::TraceSettings settings;
+    settings.rays_per_face = 5'000;
+    settings.seed = 13;
+    rad::SolarAccumulator acc(scene);
+    scene.accumulate_solar(sun, acc, settings);
+    const rad::SolarResult result = acc.result();
+
+    // A flat black plate under a parallel sun: every sample deposits the
+    // same cos(theta), so only round-off is left.
+    REQUIRE(result.direct(0) == Catch::Approx(irradiance * std::cos(elevation))
+                                    .margin(1e-3 * irradiance));
+    REQUIRE(result.direct(2) == Catch::Approx(irradiance * std::sin(elevation))
+                                    .margin(1e-3 * irradiance));
 }

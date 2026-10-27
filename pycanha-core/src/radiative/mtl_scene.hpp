@@ -117,6 +117,12 @@ class SceneImpl {
     [[nodiscard]] std::span<const double> face_areas() const noexcept {
         return _face_areas;
     }
+    // Active, non-planet faces with geometry: the faces that draw sun samples
+    // and the default emitters of the matrix kernels.
+    [[nodiscard]] std::span<const std::uint32_t> default_emitters()
+        const noexcept {
+        return _default_emitters;
+    }
     [[nodiscard]] DeviceImpl& device() const noexcept { return _device; }
     // GPU bytes resident after construction (geometry, acceleration
     // structures, tables) — the fixed cost of the scene for the memory

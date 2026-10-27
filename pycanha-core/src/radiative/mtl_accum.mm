@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <numeric>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -232,7 +231,15 @@ SolarAccumImpl::SolarAccumImpl(SceneImpl& scene) : _scene(scene) {
     _direct = _scene.create_buffer(faces * sizeof(std::uint64_t));
     _total = _scene.create_buffer(faces * sizeof(std::uint64_t));
     const std::span<const double> areas = _scene.face_areas();
-    const double total_area = std::accumulate(areas.begin(), areas.end(), 0.0);
+    // A sun sample carries at most cos * A of the face it is drawn on, and
+    // only the default emitters draw samples (a planet's faces never do), so
+    // their area bounds every cell. A planet's area here drove the
+    // fixed-point scale to 1: one deposit unit per square metre, and every
+    // lit face got S A whatever its angle to the sun.
+    double total_area = 0.0;
+    for (const std::uint32_t face : _scene.default_emitters()) {
+        total_area += areas[face];
+    }
     _area_units = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(std::ceil(total_area)));
     reset();
 }
