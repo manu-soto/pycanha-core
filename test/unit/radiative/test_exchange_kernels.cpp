@@ -1,11 +1,19 @@
 #include <array>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
+#include "pycanha-core/globals.hpp"
 #include "pycanha-core/gmm/geometrymodel.hpp"
+#include "pycanha-core/gmm/mesh/thermal_mesh.hpp"
+#include "pycanha-core/gmm/primitives/rectangle.hpp"
+#include "pycanha-core/gmm/scene/geometry_item.hpp"
 #include "pycanha-core/radiative/accumulators.hpp"
 #include "pycanha-core/radiative/device.hpp"
 #include "pycanha-core/radiative/materials.hpp"
@@ -379,4 +387,55 @@ TEST_CASE("radiative exchange: update_materials swaps properties in place",
     REQUIRE_THROWS_AS(
         scene.update_materials(make_materials(two_rows, remapped)),
         std::invalid_argument);
+}
+
+TEST_CASE("radiative exchange: a low-emittance closed box keeps its energy",
+          "[radiative][gpu][exchange]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // A closed unit box of six walls, side 1 facing in, emittance 0.05 on
+    // both sides: a ray from inside bounces ~20 times on average before it is
+    // absorbed, and 0.95^64 = 3.7 % of the energy is still in flight after 64
+    // bounces. With the default trace settings none of it may be lost.
+    using pycanha::gmm::GeometryItem;
+    using pycanha::gmm::Rectangle;
+    using pycanha::gmm::ThermalMesh;
+    pycanha::gmm::GeometryModel model("box");
+    // Corners p1, p2, p4 of each wall, (p2 - p1) x (p4 - p1) pointing in.
+    constexpr std::array<std::array<double, 9>, 6> walls{{
+        {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0},  // z = 0
+        {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0},  // z = 1
+        {0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0},  // y = 0
+        {0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0},  // y = 1
+        {0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0},  // x = 0
+        {1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0},  // x = 1
+    }};
+    for (std::size_t index = 0; index < walls.size(); ++index) {
+        const auto& c = walls.at(index);
+        model.add(std::make_shared<GeometryItem>(
+            "wall_" + std::to_string(index),
+            Rectangle(pycanha::Point3D(c[0], c[1], c[2]),
+                      pycanha::Point3D(c[3], c[4], c[5]),
+                      pycanha::Point3D(c[6], c[7], c[8])),
+            ThermalMesh{}));
+    }
+    const std::array<std::array<float, 6>, 1> rows{gray_row(0.05F)};
+    const std::array<int, 6> pair_rows{0, 0, 0, 0, 0, 0};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model.mesh_parts(),
+                              make_materials(rows, pair_rows));
+
+    rad::TraceSettings settings;  // the defaults, max_bounces included
+    settings.rays_per_face = 20'000;
+    settings.seed = 17;
+    // Every face emits: the outer sides' rays escape at once, the inner
+    // sides' bounce inside the box.
+    rad::ExchangeAccumulator acc(scene, rad::Band::IR);
+    scene.accumulate_exchange(acc, settings);
+    const rad::ExchangeResult result = acc.result();
+
+    REQUIRE(acc.conservation_error() == 0);
+    REQUIRE(std::abs(result.stats.lost_energy_fraction) < 1e-4);
 }

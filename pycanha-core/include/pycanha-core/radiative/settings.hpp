@@ -30,8 +30,13 @@ struct TraceSettings {
     std::uint32_t seed = 0;
     // MCRT ray-kill energy cutoff (exchange kernels).
     float energy_threshold = 1e-4F;
-    // Hard safety bound on the bounce loop.
-    std::uint32_t max_bounces = 64;
+    // Hard safety bound on the bounce loop. Russian roulette below
+    // energy_threshold already ends every path whose surfaces absorb
+    // anything, so the bound must not be reached before it does: the energy a
+    // ray still carries at the bound is dropped (a closed enclosure of
+    // emittance 0.05 keeps 0.95^64 = 3.7 % of it after 64 bounces). Only an
+    // enclosure that absorbs nothing needs the bound.
+    std::uint32_t max_bounces = 10'000;
     // Emit along the face normal instead of the cosine-weighted hemisphere
     // (the legacy `_Nodes` debugging mode; vf/exchange kernels only).
     bool normal_emission = false;

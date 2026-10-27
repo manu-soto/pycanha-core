@@ -8,7 +8,7 @@ TEST_CASE("radiative types: trace settings defaults", "[radiative]") {
     const rad::TraceSettings settings;
     REQUIRE(settings.rays_per_face == 10'000);
     REQUIRE(settings.seed == 0);
-    REQUIRE(settings.max_bounces == 64);
+    REQUIRE(settings.max_bounces == 10'000);
 }
 
 TEST_CASE("radiative types: accumulator config defaults", "[radiative]") {
