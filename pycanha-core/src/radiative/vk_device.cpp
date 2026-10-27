@@ -117,12 +117,19 @@ struct ExtensionSupport {
     PhysicalDeviceCheck check;
     check.physical_device = device;
 
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR accel_props{};
+    accel_props.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
     VkPhysicalDeviceProperties2 props2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-        .pNext = nullptr,
+        .pNext = &accel_props,
         .properties = {}};
     vkGetPhysicalDeviceProperties2(device, &props2);
     const VkPhysicalDeviceProperties& props = props2.properties;
+    if (accel_props.minAccelerationStructureScratchOffsetAlignment > 0) {
+        check.scratch_alignment =
+            accel_props.minAccelerationStructureScratchOffsetAlignment;
+    }
 
     check.info.name = static_cast<const char*>(props.deviceName);
     check.info.index = index;
@@ -263,7 +270,8 @@ DeviceImpl::DeviceImpl(const PhysicalDeviceCheck& picked)
       physical_device(picked.physical_device),
       has_memory_budget(picked.has_memory_budget),
       max_dispatch_emitters(picked.max_dispatch_emitters),
-      max_storage_buffer_range(picked.max_storage_buffer_range) {
+      max_storage_buffer_range(picked.max_storage_buffer_range),
+      scratch_alignment(picked.scratch_alignment) {
     const QueueFamilies families = pick_queue_families(physical_device);
     compute_family = families.compute;
     transfer_family = families.dedicated_transfer;

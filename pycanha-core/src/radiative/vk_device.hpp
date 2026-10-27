@@ -46,6 +46,9 @@ struct PhysicalDeviceCheck {
     std::uint32_t max_dispatch_emitters = 0;
     // limits.maxStorageBufferRange; see DeviceImpl::max_storage_buffer_range.
     std::uint64_t max_storage_buffer_range = 0;
+    // minAccelerationStructureScratchOffsetAlignment; see
+    // DeviceImpl::scratch_alignment.
+    std::uint32_t scratch_alignment = 256;
     // Preference when no device index is requested, highest wins: discrete >
     // integrated > other hardware > software (a software rasterizer like
     // lavapipe is a valid last resort — same SPIR-V, just slow). Ranking the
@@ -90,6 +93,12 @@ class DeviceImpl {
     // accumulator buffer beyond it would be written and read only partly,
     // with no error, so the accumulators refuse it.
     std::uint64_t max_storage_buffer_range = 0;
+    // Alignment the scratch address of an acceleration-structure build must
+    // have (VkPhysicalDeviceAccelerationStructurePropertiesKHR::
+    // minAccelerationStructureScratchOffsetAlignment, 128 on NVIDIA). A
+    // scratch buffer placed at a smaller alignment builds a corrupt BVH
+    // without any error.
+    std::uint32_t scratch_alignment = 256;
 };
 
 }  // namespace pycanha::radiative::detail

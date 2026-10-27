@@ -148,9 +148,13 @@ class SceneImpl {
     }
 
     // Buffer helpers shared with the accumulator implementations.
+    // `alignment`: the placement the buffer's device address needs beyond the
+    // driver's requirement and the 16-byte floor (acceleration-structure
+    // scratch: DeviceImpl::scratch_alignment).
     [[nodiscard]] GpuBuffer create_buffer(VkDeviceSize size,
                                           VkBufferUsageFlags usage,
-                                          BufferMemory memory);
+                                          BufferMemory memory,
+                                          VkDeviceSize alignment = 0);
     void destroy_buffer(GpuBuffer& buffer) noexcept;
     // Zeroes a DeviceLocal buffer on the device. The accumulators are not
     // mapped, so clearing them is a transfer command, not a memset.
