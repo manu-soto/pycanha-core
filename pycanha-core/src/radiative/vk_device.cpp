@@ -131,6 +131,7 @@ struct ExtensionSupport {
         static_cast<std::uint64_t>(props.limits.maxComputeWorkGroupCount[0]) *
         workgroup_size;
     check.max_dispatch_emitters = props.limits.maxComputeWorkGroupCount[1];
+    check.max_storage_buffer_range = props.limits.maxStorageBufferRange;
     if (check.info.software) {
         check.score = 0;
     } else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
@@ -261,7 +262,8 @@ DeviceImpl::DeviceImpl(const PhysicalDeviceCheck& picked)
     : info(picked.info),
       physical_device(picked.physical_device),
       has_memory_budget(picked.has_memory_budget),
-      max_dispatch_emitters(picked.max_dispatch_emitters) {
+      max_dispatch_emitters(picked.max_dispatch_emitters),
+      max_storage_buffer_range(picked.max_storage_buffer_range) {
     const QueueFamilies families = pick_queue_families(physical_device);
     compute_family = families.compute;
     transfer_family = families.dedicated_transfer;

@@ -44,6 +44,8 @@ struct PhysicalDeviceCheck {
     bool has_memory_budget = false;
     // maxComputeWorkGroupCount[1]; see DeviceImpl::max_dispatch_emitters.
     std::uint32_t max_dispatch_emitters = 0;
+    // limits.maxStorageBufferRange; see DeviceImpl::max_storage_buffer_range.
+    std::uint64_t max_storage_buffer_range = 0;
     // Preference when no device index is requested, highest wins: discrete >
     // integrated > other hardware > software (a software rasterizer like
     // lavapipe is a valid last resort — same SPIR-V, just slow). Ranking the
@@ -84,6 +86,10 @@ class DeviceImpl {
     // only guarantees maxComputeWorkGroupCount[1] >= 65535 (NVIDIA reports
     // exactly that), so longer emitter lists go out in batches of this size.
     std::uint32_t max_dispatch_emitters = 0;
+    // The largest storage buffer a kernel can address (4 GiB on NVIDIA): an
+    // accumulator buffer beyond it would be written and read only partly,
+    // with no error, so the accumulators refuse it.
+    std::uint64_t max_storage_buffer_range = 0;
 };
 
 }  // namespace pycanha::radiative::detail
