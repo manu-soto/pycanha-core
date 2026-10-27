@@ -35,6 +35,13 @@ namespace pycanha::solvers::transient {
  * iterations do not converge within max_iterations keeps its last iteration
  * and the run goes on: the first such step logs a WARN, the end of the run
  * one summary WARN, and report() lists them.
+ *
+ * A node without capacity (C = 0, an arithmetic node) is in balance at the end
+ * of every step, as in ESATAN's SLCRNC: its row leaves out the heat flow at
+ * the start of the step, so its net heat flow at the end of the step is
+ * capacity_delta (2/dt) times its change over the step. The trapezoidal rule
+ * of the diffusive nodes would instead make it alternate around its balance
+ * (R(T(n+1)) = -R(T(n))) without ever settling.
  */
 class CrankNicolson : public Solver {
   public:
@@ -115,6 +122,9 @@ class CrankNicolson : public Solver {
     VectorXd _capacities_inverse;
     // 2C/dt
     VectorXd _capacity_diagonal;
+    // 1 for a node with capacity, 0 for an arithmetic node: the weight of
+    // its heat flow at the start of the step.
+    VectorXd _start_rate_weight;
 
     VectorXd _t3_domain;
     VectorXd _t4_domain;

@@ -284,6 +284,7 @@ void CrankNicolson::prepare(bool log_warnings) {
     _capacities = VectorXd::Zero(nd);
     _capacities_inverse = VectorXd::Zero(nd);
     _capacity_diagonal = VectorXd::Zero(nd);
+    _start_rate_weight = VectorXd::Ones(nd);
     _radiation_linear_term = VectorXd::Zero(nd);
     _kt_q_n0 = VectorXd::Zero(nd);
     _a_times_t = VectorXd::Zero(nd);
@@ -310,7 +311,8 @@ SolverMemory CrankNicolson::memory_now() const {
     }
     memory.matrix += bytes_of(_rhs) + bytes_of(_heat_flux_n0) +
                      bytes_of(_capacities) + bytes_of(_capacities_inverse) +
-                     bytes_of(_capacity_diagonal) + bytes_of(_t3_domain) +
+                     bytes_of(_capacity_diagonal) +
+                     bytes_of(_start_rate_weight) + bytes_of(_t3_domain) +
                      bytes_of(_t4_domain) + bytes_of(_t4_boundary) +
                      bytes_of(_radiation_linear_term) + bytes_of(_kt_q_n0) +
                      bytes_of(_a_times_t) + bytes_of(_ones_domain) +
@@ -515,6 +517,9 @@ void CrankNicolson::build_capacities() {
     _capacities.array() += _resolved.capacity_delta;
     _capacities_inverse = _capacities.cwiseInverse();
     _capacity_diagonal = (2.0 / _resolved.time_step) * _capacities;
+    // Read from the model's capacities, before capacity_delta: a callback
+    // may give a node a capacity, or take it away, during the run.
+    _start_rate_weight = (Cd.array() > 0.0).cast<double>().matrix();
 }
 
 // -K + 2C/dt at the current temperatures, couplings and capacities.
@@ -540,8 +545,10 @@ void CrankNicolson::store_heat_flux_at_n0() {
     // K Td + Qd, with K = -A: the network holds A + 2C/dt.
     _network->multiply(Td, _kt_q_n0);
     _kt_q_n0 = Qd - _kt_q_n0 + _capacity_diagonal.cwiseProduct(Td);
-    _heat_flux_n0 =
-        _kt_q_n0 + (2.0 / _resolved.time_step) * _capacities.cwiseProduct(Td);
+    // An arithmetic node's row drops its start-of-step heat flow: it is in
+    // balance at the end of the step (see the class documentation).
+    _heat_flux_n0 = _start_rate_weight.cwiseProduct(_kt_q_n0) +
+                    (2.0 / _resolved.time_step) * _capacities.cwiseProduct(Td);
 }
 
 void CrankNicolson::solve_step() {

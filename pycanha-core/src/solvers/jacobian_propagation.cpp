@@ -354,6 +354,13 @@ void JacobianPropagation::solve() {
         _network->multiply(_mt, _mb);
         _mb = (2.0 * (_capacity_diagonal.asDiagonal() * _mt)) - _mb;
         _mb += _m_c + _m_k + _m_q;
+        // An arithmetic node's row leaves out the start of the step (K Mt and
+        // the parameter terms), as its temperature row does.
+        for (Index row = 0; row < nd; ++row) {
+            if (_start_rate_weight(row) == 0.0) {
+                _mb.row(row) = _capacity_diagonal(row) * _mt.row(row);
+            }
+        }
 
         time += _resolved.time_step;
         tmm.time = time;
