@@ -14,7 +14,7 @@ module common;
 // ray-index chunks (GPU watchdog limits + progress reporting), which is why
 // the chunk fields exist; chunking never changes results because the RNG is
 // keyed on the global ray index. The C++ mirror struct on the host must
-// match this byte-for-byte (scalar layout, 64 B).
+// match this byte-for-byte (scalar layout, 96 B).
 // ---------------------------------------------------------------------------
 public struct Push {
     public uint row_offset;        // first emitter row of this block
@@ -38,6 +38,19 @@ public struct Push {
     public float sun_dir_y;
     public float sun_dir_z;
     public float _pad;
+    // Solar kernel, SolarSource::SunPlane only: the corner of the source
+    // rectangle (world, upstream of every non-celestial part), its two side
+    // lengths along onb(sun direction), and the area each ray stands for
+    // times its share of the batch (plane area; see solar.slang). Scalars for
+    // the same layout reason as the sun direction.
+    public float plane_ox;
+    public float plane_oy;
+    public float plane_oz;
+    public float plane_len1;
+    public float plane_len2;
+    public float plane_area;
+    public float _pad1;
+    public float _pad2;
 };
 
 [[vk::push_constant]]
@@ -55,6 +68,12 @@ public static const uint FLAG_SOLAR_BAND = 2u;
 // Emission from the scrambled Sobol' sequence instead of the PCG stream
 // (TraceSettings::sampler == Sampler::Sobol). Dispatch-uniform.
 public static const uint FLAG_QMC = 4u;
+// Solar kernel: rays start on the sun plane (SolarSource::SunPlane) instead
+// of on the faces. Dispatch-uniform.
+public static const uint FLAG_SUN_PLANE = 8u;
+// Solar kernel, sun plane: the scene holds a planet part, so each ray first
+// checks that the sun is not eclipsed upstream of the plane.
+public static const uint FLAG_SCENE_HAS_PLANET = 16u;
 
 // ---------------------------------------------------------------------------
 // Shared scene bindings (set 0, bindings 0-9). Kernel-specific accumulator

@@ -315,7 +315,7 @@ void SolarAccumImpl::reset() {
 }
 
 SolarAccumImpl::BatchSetup SolarAccumImpl::prepare_batch(
-    const SolarState& sun, std::uint64_t rays_per_face) {
+    const SolarState& sun, std::uint64_t rays_per_face, double ray_area) {
     const double norm = sun.direction.norm();
     if (!(norm > 0.0)) {
         throw std::invalid_argument(
@@ -336,8 +336,16 @@ SolarAccumImpl::BatchSetup SolarAccumImpl::prepare_batch(
             "pycanha::radiative: all batches of a solar accumulator must use "
             "the same SolarState; use a fresh accumulator per sun snapshot");
     }
+    // A sun-plane ray carries its rectangle's area, which can exceed the
+    // emitters' total: the deposit units then follow it.
+    const auto ray_units = static_cast<std::uint64_t>(std::ceil(ray_area));
     if (_fp_scale <= 0.0) {
+        _area_units = std::max(_area_units, ray_units);
         _fp_scale = select_fp_scale(rays_per_face * _area_units);
+    } else if (ray_units > _area_units) {
+        throw std::invalid_argument(
+            "pycanha::radiative: a later solar batch carries more energy per "
+            "ray than the accumulator's scale allows; use a fresh accumulator");
     }
     if ((_rays_per_face + rays_per_face) * _area_units >
         max_cumulative_rays(_fp_scale)) {

@@ -58,12 +58,110 @@ void scatter(inout float3 origin, inout float3 dir, float3 position, float3 n,
     }
 }
 
+// The reflected / transmitted path after the first interaction, shared by
+// both ray sources: absorption scored into total[] at every hit.
+void follow_reflections(float3 origin, float3 dir, float energy,
+                        inout Rng rng) {
+    for (uint bounce = 0u; bounce < pc.max_bounces; ++bounce) {
+        Hit hit = trace_ray(origin, dir);
+        if (hit.miss) {
+            return;  // escaped to space
+        }
+        // One load per bounce: both tests and the optical lookup share it.
+        uint record = face_record[hit.face];
+        if ((record & FACE_FLAG_PLANET) != 0u) {
+            return;  // the planet absorbs everything, nothing to score
+        }
+        if ((record & FACE_FLAG_ACTIVE) == 0u) {
+            return;
+        }
+        float a;
+        float s;
+        float t;
+        band_properties_of(record, a, s, t);
+        float d = max(1.0 - a - s - t, 0.0);
+
+        fp_add(total_acc, hit.face, energy * a);
+        energy *= (1.0 - a);
+        if (!roulette(energy, rng)) {
+            return;
+        }
+        scatter(origin, dir, hit.position, hit.normal, s, t, d, rng);
+    }
+}
+
+// Stream id of the sun-plane rays (rng_init / qmc_sample take a face; no face
+// owns these rays, and no real face id reaches 2^32 - 1).
+static const uint SUN_PLANE_STREAM = 0xFFFFFFFFu;
+
+// SolarSource::SunPlane: the ray starts at a point of the source rectangle
+// (corner plane_o, sides plane_len1 / plane_len2 along onb(sun direction))
+// and travels along the sun direction. It stands for plane_area of collector
+// (the rectangle's area; the host divides by the batch's total rays), so the
+// first face it meets absorbs alpha * plane_area — that face's sunlit
+// projected area, sampled in proportion — and the rest goes on as in csMain.
+void trace_from_sun_plane(uint ray_index) {
+    float3 sun_dir = sun_direction();
+    Rng rng = rng_init(SUN_PLANE_STREAM, ray_index, pc.batch_seed);
+    float u;
+    float v;
+    if (qmc_mode()) {
+        u = qmc_sample(SUN_PLANE_STREAM, ray_index, 0u);
+        v = qmc_sample(SUN_PLANE_STREAM, ray_index, 1u);
+    } else {
+        u = rng_next(rng);
+        v = rng_next(rng);
+    }
+    float3 e1;
+    float3 e2;
+    onb(sun_dir, e1, e2);
+    float3 origin = float3(pc.plane_ox, pc.plane_oy, pc.plane_oz) +
+                    (u * pc.plane_len1) * e1 + (v * pc.plane_len2) * e2;
+    // A planet lies upstream of the plane, not between it and the parts: the
+    // sun is eclipsed for this ray when the way back toward it meets one.
+    if ((pc.flags & FLAG_SCENE_HAS_PLANET) != 0u &&
+        occluded(origin, -sun_dir)) {
+        return;
+    }
+    Hit hit = trace_ray(origin, sun_dir);
+    if (hit.miss) {
+        return;  // passes beside every part
+    }
+    uint record = face_record[hit.face];
+    if ((record & FACE_FLAG_PLANET) != 0u ||
+        (record & FACE_FLAG_ACTIVE) == 0u) {
+        return;  // as a shadow ray meeting them in csMain: nothing scored
+    }
+    float a;
+    float s;
+    float t;
+    band_properties_of(record, a, s, t);
+    float d = max(1.0 - a - s - t, 0.0);
+
+    float e0 = pc.plane_area;
+    fp_add(direct_acc, hit.face, e0 * a);
+    fp_add(total_acc, hit.face, e0 * a);
+
+    float energy = e0 * (1.0 - a);
+    if (!roulette(energy, rng)) {
+        return;
+    }
+    float3 dir = sun_dir;
+    scatter(origin, dir, hit.position, hit.normal, s, t, d, rng);
+    follow_reflections(origin, dir, energy, rng);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csMain(uint3 gid: SV_DispatchThreadID) {
     uint ray_local = gid.x;
     uint e = gid.y;
     if (ray_local >= pc.rays_this_chunk || e >= pc.num_emitters) {
+        return;
+    }
+    if ((pc.flags & FLAG_SUN_PLANE) != 0u) {
+        // One virtual emitter; the ray index alone places the ray.
+        trace_from_sun_plane(pc.ray_index_offset + ray_local);
         return;
     }
     uint face = emitters[e];
@@ -101,28 +199,5 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     }
     float3 dir = sun_dir;
     scatter(origin, dir, sample.position, sample.normal, s, t, d, rng);
-
-    for (uint bounce = 0u; bounce < pc.max_bounces; ++bounce) {
-        Hit hit = trace_ray(origin, dir);
-        if (hit.miss) {
-            return;  // escaped to space
-        }
-        // One load per bounce: both tests and the optical lookup share it.
-        uint record = face_record[hit.face];
-        if ((record & FACE_FLAG_PLANET) != 0u) {
-            return;  // the planet absorbs everything, nothing to score
-        }
-        if ((record & FACE_FLAG_ACTIVE) == 0u) {
-            return;
-        }
-        band_properties_of(record, a, s, t);
-        d = max(1.0 - a - s - t, 0.0);
-
-        fp_add(total_acc, hit.face, energy * a);
-        energy *= (1.0 - a);
-        if (!roulette(energy, rng)) {
-            return;
-        }
-        scatter(origin, dir, hit.position, hit.normal, s, t, d, rng);
-    }
+    follow_reflections(origin, dir, energy, rng);
 }

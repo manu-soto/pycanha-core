@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <numbers>
 #include <stdexcept>
@@ -273,4 +274,190 @@ TEST_CASE("radiative solar: determinism, additivity and sun consistency",
                                     .irradiance = solar_constant};
     REQUIRE_THROWS_AS(scene.accumulate_solar(other_sun, first, settings),
                       std::invalid_argument);
+}
+
+// ---- SolarSource::SunPlane: rays from a plane square to the sun ----------
+
+namespace {
+
+[[nodiscard]] rad::TraceSettings sun_plane_settings(
+    std::uint64_t rays, std::uint32_t seed,
+    rad::Sampler sampler = rad::Sampler::Random) {
+    rad::TraceSettings settings;
+    settings.rays_per_face = rays;  // the total, from the plane
+    settings.seed = seed;
+    settings.sampler = sampler;
+    settings.solar_source = rad::SolarSource::SunPlane;
+    return settings;
+}
+
+}  // namespace
+
+TEST_CASE("radiative solar plane: direct flux follows the cosine law",
+          "[radiative][gpu][solar][sun_plane]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const auto model = make_single_plate();
+    const std::array<std::array<float, 6>, 1> rows{gray_row(1.0F)};
+    const std::array<int, 1> pair_rows{0};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+    // The plane is the plate's projected bounding rectangle: Sobol' points
+    // on it count the plate's projected area to far below the tolerance.
+    for (const double angle_deg : {0.0, 45.0, 60.0}) {
+        check_cosine_angle(
+            scene, sun_plane_settings(1U << 20U, 3, rad::Sampler::Sobol),
+            angle_deg);
+    }
+}
+
+TEST_CASE("radiative solar plane: shadows and occluder unions",
+          "[radiative][gpu][solar][sun_plane]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const rad::SolarState sun{.direction = {0.0, 0.0, -1.0},
+                              .irradiance = solar_constant};
+    {
+        // Plate B between plate A and the sun: A gets nothing at all.
+        const auto model = make_parallel_plates(1.0);
+        const std::array<std::array<float, 6>, 1> rows{gray_row(1.0F)};
+        const std::array<int, 2> pair_rows{0, 0};
+        rad::Device device = rad::Device::create();
+        rad::RadiativeScene scene(device, model->mesh_parts(),
+                                  make_materials(rows, pair_rows));
+        rad::SolarAccumulator acc(scene);
+        scene.accumulate_solar(
+            sun, acc, sun_plane_settings(1U << 20U, 7, rad::Sampler::Sobol));
+        const rad::SolarResult result = acc.result();
+        REQUIRE(result.direct(0) == 0.0);
+        REQUIRE(result.direct(2) == 0.0);
+        REQUIRE(result.direct(3) ==
+                Catch::Approx(solar_constant).margin(1e-3 * solar_constant));
+    }
+    {
+        // The stacked strips of the face-sample test: the plate keeps
+        // x in [0.75, 1]. The plane spans x [0, 1] x y [-0.5, 1.5], so an
+        // eighth of the rays lands on the lit quarter.
+        using pycanha::gmm::GeometryItem;
+        using pycanha::gmm::Rectangle;
+        using pycanha::gmm::ThermalMesh;
+        auto model = std::make_unique<pycanha::gmm::GeometryModel>("stack");
+        model->add(std::make_shared<GeometryItem>(
+            "plate",
+            Rectangle({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}),
+            ThermalMesh{}));
+        const std::array<std::array<double, 3>, 3> strips{
+            {{0.0, 0.5, 1.0}, {0.25, 0.75, 2.0}, {0.1, 0.4, 3.0}}};
+        for (std::size_t index = 0; index < strips.size(); ++index) {
+            const auto& [x0, x1, z] = strips.at(index);
+            model->add(std::make_shared<GeometryItem>(
+                "strip_" + std::to_string(index),
+                Rectangle({x0, -0.5, z}, {x1, -0.5, z}, {x0, 1.5, z}),
+                ThermalMesh{}));
+        }
+        const std::array<std::array<float, 6>, 1> rows{gray_row(1.0F)};
+        const std::array<int, 4> pair_rows{0, 0, 0, 0};
+        rad::Device device = rad::Device::create();
+        rad::RadiativeScene scene(device, model->mesh_parts(),
+                                  make_materials(rows, pair_rows));
+        const rad::TraceSettings settings = sun_plane_settings(1U << 20U, 5);
+        rad::SolarAccumulator acc(scene);
+        scene.accumulate_solar(sun, acc, settings);
+        const rad::SolarResult result = acc.result();
+        const double p = 0.125;
+        const double sigma =
+            0.25 * solar_constant *
+            std::sqrt((1.0 - p) /
+                      (p * static_cast<double>(settings.rays_per_face)));
+        REQUIRE(result.direct(0) ==
+                Catch::Approx(0.25 * solar_constant).margin(5.0 * sigma));
+        REQUIRE(result.direct(1) == 0.0);
+    }
+}
+
+TEST_CASE("radiative solar plane: agrees with face samples, reflections too",
+          "[radiative][gpu][solar][sun_plane]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // The mirror bench: the source is edge-on to the sun and lit only by the
+    // 45-degree mirror's reflection; plus a grey oblique sun on the plates.
+    const auto model = make_source_and_mirror();
+    const std::array<std::array<float, 6>, 2> rows{
+        gray_row(1.0F),
+        std::array<float, 6>{1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F}};
+    const std::array<int, 2> pair_rows{0, 1};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+    const rad::SolarState sun{.direction = {-1.0, 0.0, 0.0},
+                              .irradiance = solar_constant};
+    rad::SolarAccumulator acc(scene);
+    scene.accumulate_solar(sun, acc, sun_plane_settings(1U << 21U, 11));
+    const rad::SolarResult result = acc.result();
+    REQUIRE(result.direct(0) == 0.0);
+    REQUIRE(result.total(0) ==
+            Catch::Approx(solar_constant).margin(0.02 * solar_constant));
+    REQUIRE(result.direct(2) == 0.0);
+    REQUIRE(result.total(2) == 0.0);
+
+    const auto plates = make_parallel_plates(1.0);
+    const std::array<std::array<float, 6>, 1> grey{gray_row(0.5F)};
+    const std::array<int, 2> grey_rows{0, 0};
+    rad::RadiativeScene plate_scene(device, plates->mesh_parts(),
+                                    make_materials(grey, grey_rows));
+    const rad::SolarState oblique{.direction = {0.3, -0.2, -1.0},
+                                  .irradiance = solar_constant};
+    rad::TraceSettings faces;
+    faces.rays_per_face = 200'000;
+    faces.seed = 23;
+    rad::SolarAccumulator by_faces(plate_scene);
+    plate_scene.accumulate_solar(oblique, by_faces, faces);
+    rad::SolarAccumulator by_plane(plate_scene);
+    plate_scene.accumulate_solar(oblique, by_plane,
+                                 sun_plane_settings(1U << 21U, 23));
+    const rad::SolarResult f = by_faces.result();
+    const rad::SolarResult p = by_plane.result();
+    for (Eigen::Index face = 0; face < f.total.rows(); ++face) {
+        REQUIRE(p.direct(face) ==
+                Catch::Approx(f.direct(face)).margin(0.01 * solar_constant));
+        REQUIRE(p.total(face) ==
+                Catch::Approx(f.total(face)).margin(0.01 * solar_constant));
+    }
+}
+
+TEST_CASE("radiative solar plane: determinism and additivity",
+          "[radiative][gpu][solar][sun_plane]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const auto model = make_parallel_plates(1.0);
+    const std::array<std::array<float, 6>, 1> rows{gray_row(0.5F)};
+    const std::array<int, 2> pair_rows{0, 0};
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+    const rad::SolarState sun{.direction = {0.3, -0.2, -1.0},
+                              .irradiance = solar_constant};
+    for (const rad::Sampler sampler : {rad::Sampler::Random,
+                                       rad::Sampler::Sobol}) {
+        rad::TraceSettings settings = sun_plane_settings(1U << 18U, 19);
+        settings.sampler = sampler;
+        rad::SolarAccumulator first(scene);
+        scene.accumulate_solar(sun, first, settings);
+        rad::SolarAccumulator second(scene);
+        scene.accumulate_solar(sun, second, settings);
+        const rad::SolarResult run_a = first.result();
+        require_bit_identical(second.result(), run_a);
+        settings.seed = 20;
+        scene.accumulate_solar(sun, first, settings);
+        REQUIRE(first.result().stats.rays_per_face == 2U * (1U << 18U));
+    }
 }

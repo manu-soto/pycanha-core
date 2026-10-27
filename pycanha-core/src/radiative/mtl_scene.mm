@@ -773,6 +773,11 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc, const TraceSettings&
 
 void SceneImpl::accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
                                  const TraceSettings& settings) {
+    if (settings.solar_source == SolarSource::SunPlane) {
+        throw std::invalid_argument(
+            "pycanha::radiative: SolarSource::SunPlane is traced on Vulkan "
+            "only so far");
+    }
     // Every active non-planet face receives its rays_per_face sun samples;
     // there is no emitter-subset variant (the kernel is O(Nf) already).
     const std::vector<std::uint32_t> list = resolve_emitters({}, settings);

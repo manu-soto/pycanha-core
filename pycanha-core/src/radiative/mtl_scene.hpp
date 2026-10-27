@@ -76,8 +76,14 @@ struct PushConstants {
     float ray_tmin_scale;
     std::array<float, 3> sun_dir;
     float pad;
+    // SolarSource::SunPlane (not yet traced on Metal: zero here).
+    std::array<float, 3> plane_origin;
+    float plane_len1;
+    float plane_len2;
+    float plane_area;
+    std::array<float, 2> pad2;
 };
-static_assert(sizeof(PushConstants) == 64);
+static_assert(sizeof(PushConstants) == 96);
 
 // Instance transform as Metal wants it: MTLPackedFloat4x3 is COLUMN-major
 // 4x3 (columns[3] is the translation), the transpose of the row-major

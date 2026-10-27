@@ -18,6 +18,22 @@ enum class Sampler : std::uint8_t {
     Sobol,
 };
 
+// Where the solar kernel's rays start (accumulate_solar only).
+enum class SolarSource : std::uint8_t {
+    // rays_per_face sample points on EVERY emitting face, each with a shadow
+    // ray toward the sun — the default, the stream every golden value pins.
+    // A face gets the same rays whatever its size or its share of the sun.
+    FaceSamples,
+    // rays_per_face rays IN TOTAL start on a plane square to the sun that
+    // covers the scene's non-celestial parts and travel along the sun
+    // direction; each carries the irradiance of its share of the plane's
+    // area (its projected area, so the cosine is implicit) to the first face
+    // it meets and on through the reflections. Rays go only where the sun
+    // reaches: a face receives rays in proportion to its sunlit projected
+    // area, and the shadowed or back-facing faces cost nothing.
+    SunPlane,
+};
+
 // Monte-Carlo trace control: a fixed ray count plus a seed make every run
 // deterministic and reproducible. Accuracy-targeted convergence is
 // intentionally NOT a C++ concept — the accumulate_* calls are
@@ -42,6 +58,8 @@ struct TraceSettings {
     bool normal_emission = false;
     // Emission sampling (see Sampler).
     Sampler sampler = Sampler::Random;
+    // Solar ray origin (see SolarSource); the other kernels ignore it.
+    SolarSource solar_source = SolarSource::FaceSamples;
 };
 
 // Accumulator buffer layout. Kernels are identical in both layouts and cells

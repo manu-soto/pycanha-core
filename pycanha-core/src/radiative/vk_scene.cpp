@@ -57,6 +57,8 @@ constexpr std::uint32_t num_bindings = 12;
 constexpr std::uint32_t flag_normal_emission = 1;
 constexpr std::uint32_t flag_solar_band = 2;
 constexpr std::uint32_t flag_qmc = 4;
+constexpr std::uint32_t flag_sun_plane = 8;
+constexpr std::uint32_t flag_scene_has_planet = 16;
 
 std::uint32_t sampler_flags(const TraceSettings& settings) {
     return settings.sampler == Sampler::Sobol ? flag_qmc : 0U;
@@ -483,6 +485,7 @@ void SceneImpl::upload_geometry(const std::vector<ScenePart>& parts) {
     _face_areas.assign(_num_faces, 0.0);
     _parts.resize(parts.size());
     _instances_host.resize(parts.size());
+    _part_local_boxes.assign(parts.size(), Eigen::AlignedBox3d());
 
     // World bounding box of the non-celestial parts: the self-intersection
     // epsilon must follow the spacecraft scale, not the planet distance.
@@ -557,6 +560,7 @@ void SceneImpl::upload_part(const ScenePart& part, std::size_t index,
             Eigen::AlignedBox3d::TopRightCeil};
         const Eigen::AlignedBox3d local_box =
             gmm::mesh::ops::bounding_box(mesh);
+        _part_local_boxes[index] = local_box;
         for (const auto corner : corners) {
             world_box.extend(part.transform.apply(local_box.corner(corner)));
         }
@@ -1166,6 +1170,10 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
 
 void SceneImpl::accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
                                  const TraceSettings& settings) {
+    if (settings.solar_source == SolarSource::SunPlane) {
+        accumulate_solar_plane(sun, acc, settings);
+        return;
+    }
     // Every active non-planet face receives its rays_per_face sun samples;
     // there is no emitter-subset variant (the kernel is O(Nf) already).
     const std::vector<std::uint32_t> list = resolve_emitters({}, settings);
@@ -1188,6 +1196,109 @@ void SceneImpl::accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
     dispatch_rows(kernel, list, settings);
 
     acc.record_batch(settings.rays_per_face, list.size());
+}
+
+void SceneImpl::accumulate_solar_plane(const SolarState& sun,
+                                       SolarAccumImpl& acc,
+                                       const TraceSettings& settings) {
+    // SolarSource::SunPlane: settings.rays_per_face rays in total from a
+    // rectangle square to the sun covering every non-celestial part's
+    // current world box (see solar.slang).
+    if (settings.rays_per_face == 0 || _default_emitters.empty()) {
+        return;
+    }
+    const double norm = sun.direction.norm();
+    if (!(norm > 0.0)) {
+        throw std::invalid_argument(
+            "pycanha::radiative: the sun direction must be a nonzero vector");
+    }
+    const Vector3D d = sun.direction / norm;
+    // The kernel's onb() (Duff et al. 2017) on the same direction, so the
+    // rectangle's sides here are the ones the GPU walks along (the kernel
+    // works in float: the margin below covers the rounding).
+    const double sign = d.z() >= 0.0 ? 1.0 : -1.0;
+    const double a = -1.0 / (sign + d.z());
+    const double b = d.x() * d.y() * a;
+    const Vector3D e1(1.0 + sign * d.x() * d.x() * a, sign * b,
+                      -sign * d.x());
+    const Vector3D e2(b, sign + d.y() * d.y() * a, -d.y());
+
+    double lo1 = std::numeric_limits<double>::infinity();
+    double hi1 = -lo1;
+    double lo2 = lo1;
+    double hi2 = -lo1;
+    double lo0 = lo1;
+    double hi0 = -lo1;
+    bool has_planet = false;
+    for (std::size_t p = 0; p < _part_local_boxes.size(); ++p) {
+        if ((_instances_host[p].flags & 1U) != 0U) {
+            has_planet = true;
+            continue;
+        }
+        const Eigen::AlignedBox3d& box = _part_local_boxes[p];
+        if (box.isEmpty()) {
+            continue;
+        }
+        const auto& rows = _instances_host[p].tf_rows;
+        for (int corner = 0; corner < 8; ++corner) {
+            const Vector3D local((corner & 1) != 0 ? box.max().x()
+                                                   : box.min().x(),
+                                 (corner & 2) != 0 ? box.max().y()
+                                                   : box.min().y(),
+                                 (corner & 4) != 0 ? box.max().z()
+                                                   : box.min().z());
+            Vector3D world;
+            for (std::size_t r = 0; r < 3; ++r) {
+                world(static_cast<Eigen::Index>(r)) =
+                    rows.at(r).at(0) * local.x() + rows.at(r).at(1) * local.y() +
+                    rows.at(r).at(2) * local.z() + rows.at(r).at(3);
+            }
+            lo1 = std::min(lo1, world.dot(e1));
+            hi1 = std::max(hi1, world.dot(e1));
+            lo2 = std::min(lo2, world.dot(e2));
+            hi2 = std::max(hi2, world.dot(e2));
+            lo0 = std::min(lo0, world.dot(d));
+            hi0 = std::max(hi0, world.dot(d));
+        }
+    }
+    if (!(hi1 >= lo1) || !(hi2 >= lo2)) {
+        return;  // no non-celestial geometry
+    }
+    // 0.1 % of the extent on every side (and at least a micrometre): the
+    // float basis of the kernel and the float transforms stay inside.
+    const double extent = std::max({hi1 - lo1, hi2 - lo2, hi0 - lo0, 1e-6});
+    const double margin = 1e-3 * extent;
+    const double len1 = (hi1 - lo1) + 2.0 * margin;
+    const double len2 = (hi2 - lo2) + 2.0 * margin;
+    const Vector3D origin =
+        (lo1 - margin) * e1 + (lo2 - margin) * e2 + (lo0 - margin) * d;
+    const double area = len1 * len2;
+
+    const SolarAccumImpl::BatchSetup setup =
+        acc.prepare_batch(sun, settings.rays_per_face, area);
+
+    KernelDispatch kernel;
+    kernel.pipeline = pipeline_for(_solar_pipeline, _solar_pipeline_qmc,
+                                   kernels::solar_qmc_spv,
+                                   "solar QMC pipeline creation", settings);
+    kernel.flags = flag_solar_band | flag_sun_plane | sampler_flags(settings) |
+                   (has_planet ? flag_scene_has_planet : 0U);
+    kernel.fp_scale = setup.fp_scale;
+    kernel.sun_dir = setup.sun_dir;
+    kernel.plane_origin = {static_cast<float>(origin.x()),
+                           static_cast<float>(origin.y()),
+                           static_cast<float>(origin.z())};
+    kernel.plane_len1 = static_cast<float>(len1);
+    kernel.plane_len2 = static_cast<float>(len2);
+    kernel.plane_area = static_cast<float>(area);
+    write_storage_descriptor(9, acc.direct_buffer());
+    write_storage_descriptor(10, acc.total_buffer());
+    write_storage_descriptor(11, _face_areas_buf.buffer);
+    // One virtual emitter: the kernel places each ray by its index alone.
+    const std::array<std::uint32_t, 1> one_emitter = {0U};
+    dispatch_rows(kernel, one_emitter, settings);
+
+    acc.record_batch(settings.rays_per_face, 1);
 }
 
 void SceneImpl::update_materials(const MaterialTable& materials) {
@@ -1276,7 +1387,12 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
         .inv_fp_scale = 1.0F / kernel.fp_scale,
         .ray_tmin_scale = _ray_tmin_scale,
         .sun_dir = kernel.sun_dir,
-        .pad = 0.0F};
+        .pad = 0.0F,
+        .plane_origin = kernel.plane_origin,
+        .plane_len1 = kernel.plane_len1,
+        .plane_len2 = kernel.plane_len2,
+        .plane_area = kernel.plane_area,
+        .pad2 = {0.0F, 0.0F}};
 
     const std::uint64_t rays_per_chunk =
         std::max<std::uint64_t>(1, max_rays_per_chunk_total / emitters.size());

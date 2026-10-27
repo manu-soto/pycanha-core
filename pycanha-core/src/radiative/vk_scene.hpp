@@ -74,7 +74,7 @@ struct InstanceDataGpu {
 static_assert(sizeof(InstanceDataGpu) == 80);
 
 // C++ mirror of the Push struct in kernels/common.slang (scalar layout,
-// 64 bytes).
+// 96 bytes).
 struct PushConstants {
     std::uint32_t row_offset;
     std::uint32_t num_emitters;
@@ -90,8 +90,13 @@ struct PushConstants {
     float ray_tmin_scale;
     std::array<float, 3> sun_dir;
     float pad;
+    std::array<float, 3> plane_origin;
+    float plane_len1;
+    float plane_len2;
+    float plane_area;
+    std::array<float, 2> pad2;
 };
-static_assert(sizeof(PushConstants) == 64);
+static_assert(sizeof(PushConstants) == 96);
 
 class SceneImpl {
   public:
@@ -114,6 +119,9 @@ class SceneImpl {
                              std::span<const std::uint32_t> emitters);
     void accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
                           const TraceSettings& settings);
+    // SolarSource::SunPlane (called by accumulate_solar).
+    void accumulate_solar_plane(const SolarState& sun, SolarAccumImpl& acc,
+                                const TraceSettings& settings);
     void update_materials(const MaterialTable& materials);
 
     [[nodiscard]] std::uint32_t num_faces() const noexcept {
@@ -212,6 +220,11 @@ class SceneImpl {
         std::uint32_t flags = 0;
         float fp_scale = 1.0F;
         std::array<float, 3> sun_dir = {0.0F, 0.0F, 0.0F};
+        // SolarSource::SunPlane only (see the Push struct).
+        std::array<float, 3> plane_origin = {0.0F, 0.0F, 0.0F};
+        float plane_len1 = 0.0F;
+        float plane_len2 = 0.0F;
+        float plane_area = 0.0F;
     };
     // Traces settings.rays_per_face rays for `emitters` (all within
     // [row_offset, row_offset + accumulator rows)), in batches of at most
@@ -243,6 +256,9 @@ class SceneImpl {
 
     std::vector<PartGpu> _parts;
     std::vector<InstanceDataGpu> _instances_host;  // updated by transforms
+    // Part-local bounding box of each part (empty for a planet part): the
+    // sun-plane source covers their current world boxes.
+    std::vector<Eigen::AlignedBox3d> _part_local_boxes;
 
     GpuBuffer _instance_ssbo;   // InstanceDataGpu[]
     GpuBuffer _tlas_instances;  // VkAccelerationStructureInstanceKHR[]

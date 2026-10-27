@@ -163,8 +163,12 @@ class SolarAccumImpl {
         std::array<float, 3> sun_dir;
         float fp_scale;
     };
+    // ray_area: the largest energy one ray can deposit, in square metres of
+    // collector (0 = a face sample's, bounded by the emitter area; the
+    // sun-plane source passes its rectangle's area).
     [[nodiscard]] BatchSetup prepare_batch(const SolarState& sun,
-                                           std::uint64_t rays_per_face);
+                                           std::uint64_t rays_per_face,
+                                           double ray_area = 0.0);
     void record_batch(std::uint64_t rays_per_face, std::size_t num_emitters);
     [[nodiscard]] SceneImpl& scene() const noexcept { return _scene; }
 
