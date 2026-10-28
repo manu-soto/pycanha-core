@@ -292,6 +292,44 @@ TEST_CASE("radiative assemble: equal ray densities average the two estimates",
     REQUIRE(value_at(result.vf, 0, 1) == ((0.25 + 0.5) / 2.0));
 }
 
+TEST_CASE("radiative assemble: area weights do not follow the allocation",
+          "[radiative][vf][assemble]") {
+    // The same pair estimates with face 0 traced at four times the rays of
+    // face 1, then at the same rays; the two directions disagree.
+    //   forward  = A_0 F_01 = 1 * 0.25   = 0.25
+    //   backward = A_1 F_10 = 3 * 0.0625 = 0.1875
+    const auto pair = [](std::uint64_t rays_0) {
+        Counts counts(2);
+        counts.set_area(0, 1.0);
+        counts.set_area(1, 3.0);
+        counts.set_rays(0, rays_0);
+        counts.set_rays(1, 1024);
+        counts.set(0, 1, static_cast<std::uint32_t>(rays_0 / 4));
+        counts.set(1, 0, 64);
+        return counts;
+    };
+    // Exponent 1, so that the weight is exact (inverse-variance).
+    rad::AccumConfig by_area = ray_density(1.0);
+    by_area.triangulation.area_weights = true;
+    // Areas 1 and 3: Y = 1/2, the forward weight 3/4, whatever the rays; on
+    // the uniform trace the actual counts give the same. The allocated
+    // trace's mean of 2560 rays makes A/N non-dyadic: compared as a real.
+    const double expected = (0.75 * 0.25) + (0.25 * 0.1875);
+    REQUIRE(value_at(pair(4096).dense(by_area).vf, 0, 1) ==
+            Catch::Approx(expected).epsilon(1e-15));
+    REQUIRE(value_at(pair(1024).dense(by_area).vf, 0, 1) == expected);
+    REQUIRE(same_entries(pair(1024).dense(by_area).vf,
+                         pair(1024).dense(ray_density(1.0)).vf));
+    // A/N of 1/4096 against 3/1024: Y = 11/13, the forward weight 12/13.
+    REQUIRE(value_at(pair(4096).dense(ray_density(1.0)).vf, 0, 1) ==
+            Catch::Approx(((12.0 * 0.25) + 0.1875) / 13.0).epsilon(1e-15));
+    // The default exponent bit for bit on the uniform trace as well.
+    rad::AccumConfig by_area_default = ray_density();
+    by_area_default.triangulation.area_weights = true;
+    REQUIRE(same_entries(pair(1024).dense(by_area_default).vf,
+                         pair(1024).dense(ray_density()).vf));
+}
+
 TEST_CASE(
     "radiative assemble: an exponent of one is inverse-variance weighting",
     "[radiative][vf][assemble]") {

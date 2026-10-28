@@ -311,6 +311,56 @@ TEST_CASE("radiative exchange assemble: the stored value is the weighted H",
             1.3125);
 }
 
+TEST_CASE("radiative exchange assemble: area weights leave a uniform trace "
+          "unchanged",
+          "[radiative][exchange][assemble]") {
+    // Every face of make_scene emitted 1024 rays, so the mean is 1024 and the
+    // weights are the same doubles: the tabulated exponent too.
+    const Cells cells = make_scene();
+    for (const double exponent : {1.0, 0.4}) {
+        rad::AccumConfig by_area = ray_density(exponent);
+        by_area.triangulation.area_weights = true;
+        REQUIRE(same_entries(cells.dense(by_area).factors,
+                             cells.dense(ray_density(exponent)).factors));
+        REQUIRE(same_entries(cells.tiled(by_area).factors,
+                             cells.tiled(ray_density(exponent)).factors));
+    }
+}
+
+TEST_CASE("radiative exchange assemble: area weights do not follow the "
+          "allocation",
+          "[radiative][exchange][assemble]") {
+    // The same pair estimates traced twice: face 0 with four times the rays
+    // of face 1, then both with the same rays. The two directions disagree
+    // (as faces that touch can), so the combined value is wherever the
+    // weight puts it between them.
+    //   forward  = A_0 eps_0 B_01 = 1 * 1   * 0.25  = 0.25
+    //   backward = A_1 eps_1 B_10 = 3 * 0.5 * 0.125 = 0.1875
+    const auto pair = [](std::uint64_t rays_0) {
+        Cells cells(2);
+        cells.set_slot(0, /*area=*/1.0, /*emissivity=*/1.0, rays_0);
+        cells.set_slot(1, 3.0, 0.5, 1024);
+        cells.set(0, 1, rays_0 * 256);  // B_01 = 0.25 at any ray count
+        cells.set(1, 0, 131072);        // B_10 = 0.125
+        return cells;
+    };
+    rad::AccumConfig by_area = ray_density();
+    by_area.triangulation.area_weights = true;
+    // Areas 1 and 3: Y = 1/2, the forward weight 3/4, whatever the rays. The
+    // mean of 4096 and 1024 rays is 2560, whose A/N are not dyadic, so the
+    // allocated trace is compared as a real; the uniform one is exact.
+    const double expected = (0.75 * 0.25) + (0.25 * 0.1875);
+    REQUIRE(value_at(pair(4096).dense(by_area).factors, 0, 1) ==
+            Catch::Approx(expected).epsilon(1e-15));
+    REQUIRE(value_at(pair(1024).dense(by_area).factors, 0, 1) == expected);
+    REQUIRE(value_at(pair(1024).dense(ray_density()).factors, 0, 1) ==
+            expected);
+    // The actual counts move it towards the forward estimate: A/N is 1/4096
+    // against 3/1024, Y = 11/13, the forward weight 12/13.
+    REQUIRE(value_at(pair(4096).dense(ray_density()).factors, 0, 1) ==
+            Catch::Approx(((12.0 * 0.25) + 0.1875) / 13.0).epsilon(1e-15));
+}
+
 TEST_CASE("radiative exchange assemble: reciprocity is structural",
           "[radiative][exchange][assemble]") {
     const Cells cells = make_scene();

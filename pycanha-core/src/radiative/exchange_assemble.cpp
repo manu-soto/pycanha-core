@@ -46,6 +46,9 @@ struct SlotScales {
     // factor appears in BOTH directions and cancels out of the weight, so
     // the proxy is the same one the view-factor assembly uses.
     std::vector<double> ratio;
+    // What the weight reads: `ratio` itself, or A_i over the emitting faces'
+    // mean rays (TriangulationConfig::area_weights, weight_ratios).
+    std::vector<double> weight;
     // A_i eps_i: the emissive area a stored H is divided by to recover the
     // intensive B, and therefore what the threshold compares against.
     std::vector<double> emissive_area;
@@ -56,7 +59,7 @@ struct SlotScales {
 
 [[nodiscard]] SlotScales slot_scales(
     std::span<const double> areas, std::span<const double> emissivity,
-    std::span<const std::uint64_t> rays_per_row) {
+    std::span<const std::uint64_t> rays_per_row, bool area_weights) {
     const std::size_t faces = areas.size();
     SlotScales scales;
     scales.emission.assign(faces, 0.0);
@@ -71,6 +74,7 @@ struct SlotScales {
             scales.ratio[face] = areas[face] / rays;
         }
     }
+    scales.weight = weight_ratios(areas, rays_per_row, area_weights);
     return scales;
 }
 
@@ -252,7 +256,7 @@ class ExchangeEmit {
             return forward;
         }
         const double weight = _weighting->forward_weight(
-            _scales->ratio[row], _scales->ratio[column]);
+            _scales->weight[row], _scales->weight[column]);
         return (weight * forward) + ((1.0 - weight) * backward);
     }
 
@@ -362,7 +366,8 @@ ExchangeResult assemble_exchange(const ExchangeInputs& in,
     }
     const std::size_t cols = matrix_columns(faces);
     const SlotScales scales =
-        slot_scales(in.areas, in.emissivity, in.rays_per_row);
+        slot_scales(in.areas, in.emissivity, in.rays_per_row,
+                    config.triangulation.area_weights);
     const Weighting weighting(config.triangulation, tuning);
     const bool keep_full = config.triangulation.keep_full_matrix;
 

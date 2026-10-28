@@ -135,6 +135,37 @@ Weighting::Weighting(const TriangulationConfig& config,
       _tabulated(tuning.tabulated_weight),
       _table(config.exponent) {}
 
+std::vector<double> weight_ratios(std::span<const double> areas,
+                                  std::span<const std::uint64_t> rays_per_row,
+                                  bool area_weights) {
+    std::vector<double> ratio(areas.size(), 0.0);
+    double rays_used = 0.0;
+    if (area_weights) {
+        // An integer sum and count, then one division: for N rays on each of
+        // k faces this is (N k) / k, which is N exactly, so a uniform trace
+        // divides by the same double as with the actual counts.
+        std::uint64_t total = 0;
+        std::uint64_t emitting = 0;
+        for (const std::uint64_t rays : rays_per_row) {
+            total += rays;
+            emitting += rays > 0 ? 1U : 0U;
+        }
+        if (emitting > 0) {
+            rays_used =
+                static_cast<double>(total) / static_cast<double>(emitting);
+        }
+    }
+    for (std::size_t face = 0; face < areas.size(); ++face) {
+        if (rays_per_row[face] > 0) {
+            ratio[face] =
+                areas[face] / (area_weights
+                                   ? rays_used
+                                   : static_cast<double>(rays_per_row[face]));
+        }
+    }
+    return ratio;
+}
+
 unsigned worker_count(const AssemblyTuning& tuning, std::size_t work_items,
                       std::size_t cells) {
     constexpr std::size_t parallel_cell_threshold = 1U << 18U;
