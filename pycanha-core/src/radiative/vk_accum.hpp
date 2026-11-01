@@ -232,7 +232,7 @@ class NodeExchangeAccumImpl {
     GpuBuffer _cells;             // device-local u64, stride columns() + 3
     GpuBuffer _readback;          // host-visible mirror of _cells
     GpuBuffer _face_columns_buf;  // u32 per face
-    GpuBuffer _face_weights_buf;  // float2 per face (share, u)
+    GpuBuffer _face_weights_buf;  // float4 per face (share, u, u rest, 0)
     std::vector<HostCountRow> _host_rows;  // Tiled: per node row
     std::vector<std::uint32_t> _emitters;  // fixed by the first batch
     double _fp_scale = 0.0;

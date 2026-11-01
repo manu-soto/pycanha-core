@@ -45,9 +45,10 @@ static const uint FLAG_NODE_FORWARD_ONLY = 256u;
 
 #if !defined(PYCANHA_METAL_BACKEND)
 [[vk::binding(10, 0)]] StructuredBuffer<uint> node_column;
-// x: the face's emission share; y: the u its blend weight reads, the face's
-// area when it emits and 0 when it does not.
-[[vk::binding(11, 0)]] StructuredBuffer<float2> node_weight;
+// x: the face's emission share; y + z: the u its blend weight reads (the
+// face's area when it emits, 0 when it does not) as a float and the rest of
+// the double below it; w unused.
+[[vk::binding(11, 0)]] StructuredBuffer<float4> node_weight;
 
 // The fixed-point amount times a share in [0, 1], in integers: the share as a
 // 30-bit fraction q (the float share times 2^30, exact for shares of 2^-7 and
@@ -76,19 +77,23 @@ uint64_t scaled_signed(uint64_t amount, float share) {
 
 // Weight of the deposits `face` makes on `hit_face` in the combined pair
 // (pair_walk's WeightTable::forward_weight, in float): its own estimate
-// alone when the partner never emits or for a self-hit.
-float blend_weight(uint face, float u, uint hit_face) {
+// alone when the partner never emits or for a self-hit. u and v come as a
+// float and its remainder, so that the difference of two nearly equal areas
+// keeps the double's digits: |ratio|^n has an infinite slope at 0, and with
+// the areas rounded to floats two equal-looking faces (a cube's cells) came
+// out at ratio ~3e-8 and weights 1e-3 off.
+float blend_weight(uint face, float2 u, uint hit_face) {
     if (hit_face == face) {
         return 1.0;
     }
     if ((pc.flags & FLAG_NODE_FORWARD_ONLY) != 0u) {
         return face < hit_face ? 1.0 : 0.0;
     }
-    float v = node_weight[hit_face].y;
-    if (!(v > 0.0)) {
+    float2 v = node_weight[hit_face].yz;
+    if (!(v.x > 0.0)) {
         return 1.0;
     }
-    float ratio = (v - u) / (u + v);
+    float ratio = ((v.x - u.x) + (v.y - u.y)) / (u.x + v.x);
     float magnitude = pow(abs(ratio), pc.blend_exponent);
     return 0.5 * (1.0 + (ratio < 0.0 ? -magnitude : magnitude));
 }
@@ -97,7 +102,7 @@ float blend_weight(uint face, float u, uint hit_face) {
 // One deposit of `face`'s path onto `hit_face`: into the face's row at the
 // hit face's column, or in node rows into the nodes' cell, scaled.
 // `emitter` is node_weight[face] (unused in face rows).
-void deposit(uint row_base, uint face, float2 emitter, uint hit_face,
+void deposit(uint row_base, uint face, float4 emitter, uint hit_face,
              uint64_t amount) {
 #if !defined(PYCANHA_METAL_BACKEND)
     if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
@@ -106,7 +111,7 @@ void deposit(uint row_base, uint face, float2 emitter, uint hit_face,
         // there is no other direction to combine with, only the share.
         float weight = column + 1u == pc.num_faces
                            ? 1.0
-                           : blend_weight(face, emitter.y, hit_face);
+                           : blend_weight(face, emitter.yz, hit_face);
         uint64_t value = scaled(amount, emitter.x * weight);
         if (value != uint64_t(0)) {
             fp_add_raw(acc, row_base + column, value);
@@ -121,7 +126,7 @@ void deposit(uint row_base, uint face, float2 emitter, uint hit_face,
 // in node rows times the emitting face's share alone (a virtual column has no
 // partner direction). Scaled where the path produces it, so that csMain
 // reaches its subgroup sums exactly as in face rows.
-uint64_t tail(uint64_t amount, float2 emitter) {
+uint64_t tail(uint64_t amount, float4 emitter) {
 #if !defined(PYCANHA_METAL_BACKEND)
     if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
         return scaled(amount, emitter.x);
@@ -132,7 +137,7 @@ uint64_t tail(uint64_t amount, float2 emitter) {
 
 // The same for a wrapping balance that may be negative (a Russian-roulette
 // withdrawal from the lost column).
-uint64_t tail_signed(uint64_t amount, float2 emitter) {
+uint64_t tail_signed(uint64_t amount, float4 emitter) {
 #if !defined(PYCANHA_METAL_BACKEND)
     if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
         return scaled_signed(amount, emitter.x);
@@ -152,7 +157,7 @@ struct Tails {
 
 // One path from `face`: deposits on real faces go to the accumulator
 // directly, the balances that end in a virtual column go to `tails`.
-void trace_path(uint face, uint ray_index, uint row_base, float2 emitter,
+void trace_path(uint face, uint ray_index, uint row_base, float4 emitter,
                 inout Tails tails) {
     Rng rng = rng_init(face, ray_index, pc.batch_seed);
 
@@ -258,7 +263,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     uint face = emitters[e];
     uint stride = pc.num_faces + 3u;
     uint row = face;
-    float2 emitter = float2(1.0, 0.0);
+    float4 emitter = float4(1.0, 0.0, 0.0, 0.0);
 #if !defined(PYCANHA_METAL_BACKEND)
     if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
         row = node_column[face];

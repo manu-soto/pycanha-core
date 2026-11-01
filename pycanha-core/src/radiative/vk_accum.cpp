@@ -379,7 +379,7 @@ NodeExchangeAccumImpl::NodeExchangeAccumImpl(
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     // Filled by the first batch (fix_weights); zero until then.
     _face_weights_buf = _scene.create_buffer(
-        std::max<VkDeviceSize>(faces * 2 * sizeof(float), 16), accum_usage,
+        std::max<VkDeviceSize>(faces * 4 * sizeof(float), 16), accum_usage,
         BufferMemory::DeviceLocal);
     _scene.clear_buffer(_face_weights_buf);
     reset();
@@ -456,21 +456,26 @@ void NodeExchangeAccumImpl::fix_weights() {
             _node_emissive_area[node] += emissive;
         }
     }
-    // (share, u) per face. u is the face's area when it emits: on a trace
-    // where every emitter sends the same rays, A / N and A over the mean rays
-    // (both settings of area_weights) only differ by the common N, which the
-    // weight's ratio cancels.
-    std::vector<float> weights(2 * faces, 0.0F);
+    // (share, u as a float and the rest of the double, unused) per face. u is
+    // the face's area when it emits: on a trace where every emitter sends the
+    // same rays, A / N and A over the mean rays (both settings of
+    // area_weights) only differ by the common N, which the weight's ratio
+    // cancels.
+    constexpr std::size_t record = 4;
+    std::vector<float> weights(record * faces, 0.0F);
     for (std::size_t face = 0; face < faces; ++face) {
         const std::uint32_t node = _face_column[face];
         if (node < nodes && _node_scale[node] > 0.0) {
-            weights[2 * face] = static_cast<float>(
+            weights[record * face] = static_cast<float>(
                 areas[face] * emissivity[face] / _node_scale[node]);
         }
     }
     _emitted_area = 0.0;
     for (const std::uint32_t face : _emitters) {
-        weights[(2 * face) + 1] = static_cast<float>(areas[face]);
+        const auto high = static_cast<float>(areas[face]);
+        weights[(record * face) + 1] = high;
+        weights[(record * face) + 2] =
+            static_cast<float>(areas[face] - static_cast<double>(high));
         _emitted_area += areas[face] * emissivity[face];
     }
     _scene.upload_to_device_buffer(_face_weights_buf, weights.data(),
