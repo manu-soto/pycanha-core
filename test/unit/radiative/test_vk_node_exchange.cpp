@@ -29,6 +29,7 @@
 #include "pycanha-core/radiative/results.hpp"
 #include "pycanha-core/radiative/scene.hpp"
 #include "pycanha-core/radiative/settings.hpp"
+#include "radiative/vk_test_hooks.hpp"
 #include "scene_fixtures.hpp"
 
 namespace rad = pycanha::radiative;
@@ -393,4 +394,32 @@ TEST_CASE("radiative vulkan: one face a node gives the face rows' balances",
             REQUIRE(std::abs(actual - expected) <= 1e-12 * std::abs(expected));
         }
     }
+}
+
+TEST_CASE(
+    "radiative vulkan: node rows read back whole where blocks cannot "
+    "be compacted",
+    "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // Launches of at most 5 emitter rows: every Tiled block of 50 node rows
+    // is then refused by the compaction and read back whole (absorb_block,
+    // whose host mirror is only allocated here).
+    Bench bench;
+    rad::NodeExchangeAccumulator dense(bench.scene, rad::Band::IR, bench.nodes);
+    trace_two_batches(bench.scene, dense, {});
+    const rad::NodeExchangeResult reference = dense.result();
+    rad::detail::lower_max_dispatch_emitters(bench.device, 5U);
+    rad::AccumConfig config;
+    config.layout = rad::AccumLayout::Tiled;
+    config.tile_rows = 50;
+    rad::NodeExchangeAccumulator tiled(bench.scene, rad::Band::IR, bench.nodes,
+                                       config);
+    trace_two_batches(bench.scene, tiled, {});
+    const rad::NodeExchangeResult result = tiled.result();
+    REQUIRE(reference.factors.nonZeros() > 0);
+    REQUIRE(csr_bit_identical(result.factors, reference.factors));
+    REQUIRE(result.intra_node_total == reference.intra_node_total);
 }

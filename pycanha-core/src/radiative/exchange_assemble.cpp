@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "closure_projection.hpp"
+#include "csr_assembly.hpp"
 #include "pair_walk.hpp"
 #include "pycanha-core/radiative/materials.hpp"
 #include "pycanha-core/radiative/results.hpp"
@@ -586,15 +587,16 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
             std::min(in.node_emissive_area[row], in.node_emissive_area[column]);
         return !(smaller > 0.0) || (std::abs(value) / smaller) > threshold;
     };
-    std::vector<RowEntries> rows(nodes);
     std::vector<double> diagonal(nodes, 0.0);
     std::vector<double> lost(nodes, 0.0);
-    parallel_for_index(nodes, threads, [&](std::size_t row) {
-        RowEntries& out = rows[row];
+    // One output row in ascending column: this row's deposits on higher
+    // nodes merged with the lower list gathered for it, then the buckets
+    // (result columns space, inactive, lost, unassigned). `emit` receives
+    // each stored (column, value); the diagonal and the lost bucket are
+    // written aside.
+    const auto merge_row = [&](std::size_t row, const auto& emit) {
         std::size_t at = start[row];
         const std::size_t end = start[row + 1];
-        // Each bucket keeps its value until the real columns are written:
-        // result columns run space, inactive, lost, unassigned.
         std::array<double, node_buckets> buckets{};
         visit(row, [&](std::size_t column, std::uint64_t cell) {
             if (column < row) {
@@ -608,7 +610,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
                 // Upper entries of other rows that precede this column.
                 for (; at < end && lower_row[at] < column; ++at) {
                     if (keep(lower_value[at], row, lower_row[at])) {
-                        out.push(lower_row[at], lower_value[at]);
+                        emit(lower_row[at], lower_value[at]);
                     }
                 }
                 double value = static_cast<double>(cell) * unit[row];
@@ -616,7 +618,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
                     value += lower_value[at++];
                 }
                 if (keep(value, row, column)) {
-                    out.push(column, value);
+                    emit(column, value);
                 }
                 return;
             }
@@ -631,17 +633,48 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
         });
         for (; at < end; ++at) {
             if (keep(lower_value[at], row, lower_row[at])) {
-                out.push(lower_row[at], lower_value[at]);
+                emit(lower_row[at], lower_value[at]);
             }
         }
         lost[row] = buckets[lost_bucket];
         for (std::size_t bucket = 0; bucket < buckets.size(); ++bucket) {
             if (buckets[bucket] != 0.0) {
-                out.push(nodes + bucket, buckets[bucket]);
+                emit(nodes + bucket, buckets[bucket]);
             }
         }
+    };
+    // Written straight into the result's CSR arrays: the rows counted
+    // first, then filled in place, so no per-row copy is held beside them.
+    std::vector<std::size_t> counts(nodes, 0);
+    parallel_for_index(nodes, threads, [&](std::size_t row) {
+        std::size_t count = 0;
+        merge_row(row, [&count](std::size_t /*column*/, double /*value*/) {
+            ++count;
+        });
+        counts[row] = count;
     });
-    result.factors = pack_rows(rows, result_cols, threads);
+    std::size_t total = 0;
+    for (const std::size_t count : counts) {
+        total += count;
+    }
+    check_sparse_capacity(total);
+    SparseMatrix& factors = result.factors;
+    factors.resizeNonZeros(static_cast<Eigen::Index>(total));
+    SparseIndex* const outer = factors.outerIndexPtr();
+    SparseIndex* const inner = factors.innerIndexPtr();
+    double* const values = factors.valuePtr();
+    outer[0] = 0;
+    for (std::size_t row = 0; row < nodes; ++row) {
+        outer[row + 1] = outer[row] + static_cast<SparseIndex>(counts[row]);
+    }
+    parallel_for_index(nodes, threads, [&](std::size_t row) {
+        auto at = static_cast<std::size_t>(outer[row]);
+        merge_row(row, [&](std::size_t column, double value) {
+            inner[at] = static_cast<SparseIndex>(column);
+            values[at] = value;
+            ++at;
+        });
+    });
     // Summed in row order, so the totals do not depend on the threads.
     result.intra_node_total =
         std::accumulate(diagonal.begin(), diagonal.end(), 0.0);

@@ -366,8 +366,14 @@ NodeExchangeAccumImpl::NodeExchangeAccumImpl(
     check_storage_range(_scene, cell_bytes);
     _cells = _scene.create_buffer(cell_bytes, accum_usage,
                                   BufferMemory::DeviceLocal);
-    _readback = _scene.create_buffer(cell_bytes, readback_usage,
-                                     BufferMemory::HostReadback);
+    // Dense reads its cells back whole; a Tiled block is compacted on the
+    // device and only falls back to a whole readback (absorb_block), which
+    // allocates the host mirror when it first happens: on the reference
+    // scene's 6 053-row blocks it was 2.1 GB of host memory never touched.
+    if (_config.layout == AccumLayout::Dense) {
+        _readback = _scene.create_buffer(cell_bytes, readback_usage,
+                                         BufferMemory::HostReadback);
+    }
     _face_columns_buf = _scene.upload_to_new_buffer(
         _face_column.data(), faces * sizeof(std::uint32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -488,6 +494,10 @@ float NodeExchangeAccumImpl::prepare_batch(std::uint64_t rays_per_face) {
 
 void NodeExchangeAccumImpl::absorb_block(std::span<const std::uint32_t> rows,
                                          std::uint32_t row_offset) {
+    if (_readback.buffer == VK_NULL_HANDLE) {
+        _readback = _scene.create_buffer(_cells.size, readback_usage,
+                                         BufferMemory::HostReadback);
+    }
     _scene.read_back(_cells, _readback);
     const std::size_t cols =
         columns() + static_cast<std::size_t>(num_virtual_columns);
