@@ -266,6 +266,16 @@ if(PYCANHA_OPTION_RAYTRACING)
     )
     add_dependencies(${LIB_NAME} pycanha_kernel_vf pycanha_kernel_exchange
         pycanha_kernel_solar)
+    if(PYCANHA_KERNEL_TARGET STREQUAL "spirv")
+        # Tiled exchange blocks compacted on the device before the readback
+        # (vk_scene.cpp, SceneImpl::compact_block); Metal reads blocks whole.
+        pycanha_add_slang_kernel(compact
+            SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/kernels/compact.slang
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/kernels/common.slang
+            TARGET spirv
+        )
+        add_dependencies(${LIB_NAME} pycanha_kernel_compact)
+    endif()
     target_include_directories(${LIB_NAME} PRIVATE ${PYCANHA_KERNEL_EMBED_DIR})
 endif()
 

@@ -210,6 +210,18 @@ class SceneImpl {
     void dispatch_batch(const KernelDispatch& kernel,
                         std::span<const std::uint32_t> emitters,
                         const TraceSettings& settings);
+    // Uploads an emitter list into _emitters_buf (grown when needed) and
+    // points descriptor 4 at it.
+    void upload_emitters(std::span<const std::uint32_t> emitters);
+    // Tiled exchange: compacts the block just traced on the device and merges
+    // its non-zero cells into the accumulator's host rows (kernels/
+    // compact.slang), instead of reading the whole block back. False when the
+    // block cannot go this way (no compaction kernel, more rows than one
+    // launch takes): the caller then reads
+    // it back whole. The block's cells are left as they were either way.
+    [[nodiscard]] bool compact_block(ExchangeAccumImpl& acc,
+                                     std::span<const std::uint32_t> block,
+                                     std::uint32_t row_offset);
     // Shared argument validation of the accumulate_* entry points; returns
     // the effective emitter list (the default list when `emitters` is
     // empty). An empty return means there is nothing to trace.
@@ -254,6 +266,15 @@ class SceneImpl {
     VkPipeline _vf_pipeline = VK_NULL_HANDLE;
     VkPipeline _exchange_pipeline = VK_NULL_HANDLE;
     VkPipeline _solar_pipeline = VK_NULL_HANDLE;
+    // Tiled block compaction (compact_block): the kernel, a u32 per block row
+    // (counts, then each row's first output pair) on the device and its
+    // mapped copy for both directions, and the (column, cell) output pairs
+    // with their readback, grown on demand.
+    VkPipeline _compact_pipeline = VK_NULL_HANDLE;
+    GpuBuffer _compact_counts;
+    GpuBuffer _compact_counts_io;
+    GpuBuffer _compact_entries;
+    GpuBuffer _compact_entries_rb;
     VkDescriptorPool _descriptor_pool = VK_NULL_HANDLE;
     VkDescriptorSet _descriptor_set = VK_NULL_HANDLE;
 
