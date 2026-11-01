@@ -714,9 +714,8 @@ TEST_CASE("radiative tiled host rows: sorted merges match the map semantics",
     row.add_dense(std::span<const std::uint64_t>(second));
     const std::vector<detail::HostCountRow::value_type> expected{
         {0, 2}, {1, 6}, {3, 0}, {4, 4}, {5, 10}};
-    REQUIRE(std::vector<detail::HostCountRow::value_type>(row.begin(),
-                                                           row.end()) ==
-            expected);
+    REQUIRE(std::vector<detail::HostCountRow::value_type>(
+                row.begin(), row.end()) == expected);
     // u32 cells (the view-factor counts) and the map-like operations.
     const std::vector<std::uint32_t> counts{0, 0, 3};
     row.add_dense(std::span<const std::uint32_t>(counts));

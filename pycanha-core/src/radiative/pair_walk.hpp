@@ -92,8 +92,9 @@ class HostCountRow {
             _entries.reserve(nonzero);
             for (std::size_t col = 0; col < cells.size(); ++col) {
                 if (cells[col] != 0) {
-                    _entries.emplace_back(static_cast<std::uint32_t>(col),
-                                          static_cast<std::uint64_t>(cells[col]));
+                    _entries.emplace_back(
+                        static_cast<std::uint32_t>(col),
+                        static_cast<std::uint64_t>(cells[col]));
                 }
             }
             return;
@@ -111,7 +112,8 @@ class HostCountRow {
             }
             if (it != _entries.end() && it->first == column) {
                 merged.emplace_back(
-                    column, it->second + static_cast<std::uint64_t>(cells[col]));
+                    column,
+                    it->second + static_cast<std::uint64_t>(cells[col]));
                 ++it;
             } else {
                 merged.emplace_back(column,
@@ -125,11 +127,10 @@ class HostCountRow {
   private:
     [[nodiscard]] std::vector<value_type>::iterator lower(
         std::uint32_t column) {
-        return std::lower_bound(
-            _entries.begin(), _entries.end(), column,
-            [](const value_type& entry, std::uint32_t c) {
-                return entry.first < c;
-            });
+        return std::lower_bound(_entries.begin(), _entries.end(), column,
+                                [](const value_type& entry, std::uint32_t c) {
+                                    return entry.first < c;
+                                });
     }
 
     std::vector<value_type> _entries;

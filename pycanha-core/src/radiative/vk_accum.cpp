@@ -64,8 +64,8 @@ void merge_block_rows(std::span<const Cell> scratch, std::size_t cols,
                       std::span<const std::uint32_t> block_emitters,
                       std::uint32_t row_offset,
                       std::vector<HostCountRow>& host_rows) {
-    const unsigned threads = worker_count(
-        {}, block_emitters.size(), block_emitters.size() * cols);
+    const unsigned threads =
+        worker_count({}, block_emitters.size(), block_emitters.size() * cols);
     parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
         const std::uint32_t face = block_emitters[index];
         host_rows[face].add_dense(scratch.subspan(
