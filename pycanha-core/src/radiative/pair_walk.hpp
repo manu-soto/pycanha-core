@@ -136,8 +136,9 @@ class HostCountRow {
         if (_entries.empty()) {
             _entries.reserve(count);
             for (std::size_t k = 0; k < count; ++k) {
-                _entries.emplace_back(static_cast<std::uint32_t>(entries[2 * k]),
-                                      entries[(2 * k) + 1]);
+                _entries.emplace_back(
+                    static_cast<std::uint32_t>(entries[2 * k]),
+                    entries[(2 * k) + 1]);
             }
             return;
         }

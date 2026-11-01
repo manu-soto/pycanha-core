@@ -216,9 +216,9 @@ void ExchangeAccumImpl::absorb_compact(
     const unsigned threads =
         worker_count({}, block_emitters.size(), entries.size());
     parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
-        _host_rows[block_emitters[index]].add_sparse(entries.subspan(
-            static_cast<std::size_t>(first[index]) * 2,
-            static_cast<std::size_t>(counts[index]) * 2));
+        _host_rows[block_emitters[index]].add_sparse(
+            entries.subspan(static_cast<std::size_t>(first[index]) * 2,
+                            static_cast<std::size_t>(counts[index]) * 2));
     });
 }
 

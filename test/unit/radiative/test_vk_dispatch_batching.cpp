@@ -224,8 +224,8 @@ TEST_CASE("radiative vulkan: compacted Tiled exchange blocks match Dense",
             scene.accumulate_exchange(tiled, settings, emitters);
             settings.seed = 4;
             scene.accumulate_exchange(tiled, settings, emitters);
-            REQUIRE(csr_bit_identical(tiled.result().factors,
-                                      reference.factors));
+            REQUIRE(
+                csr_bit_identical(tiled.result().factors, reference.factors));
             REQUIRE(tiled.conservation_error() == 0);
         }
     }

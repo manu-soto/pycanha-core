@@ -1238,8 +1238,8 @@ void SceneImpl::upload_emitters(std::span<const std::uint32_t> emitters) {
 bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                               std::span<const std::uint32_t> block,
                               std::uint32_t row_offset) {
-    if (_compact_pipeline == VK_NULL_HANDLE ||
-        block.empty() || block.size() > _device.max_dispatch_emitters) {
+    if (_compact_pipeline == VK_NULL_HANDLE || block.empty() ||
+        block.size() > _device.max_dispatch_emitters) {
         return false;
     }
     const auto rows = static_cast<std::uint32_t>(block.size());
@@ -1256,15 +1256,16 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
         destroy_buffer(_compact_counts_io);
         _compact_counts = create_buffer(count_bytes, storage_and_transfer,
                                         BufferMemory::DeviceLocal);
-        _compact_counts_io =
-            create_buffer(count_bytes, transfer_both, BufferMemory::HostReadback);
+        _compact_counts_io = create_buffer(count_bytes, transfer_both,
+                                           BufferMemory::HostReadback);
     }
     if (_compact_entries.buffer == VK_NULL_HANDLE) {
         constexpr VkDeviceSize initial = VkDeviceSize{1} << 20U;
         _compact_entries = create_buffer(initial, storage_and_transfer,
                                          BufferMemory::DeviceLocal);
-        _compact_entries_rb = create_buffer(
-            initial, VK_BUFFER_USAGE_TRANSFER_DST_BIT, BufferMemory::HostReadback);
+        _compact_entries_rb =
+            create_buffer(initial, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          BufferMemory::HostReadback);
     }
     upload_emitters(block);
     write_storage_descriptor(9, acc.buffer());
@@ -1323,8 +1324,8 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                              &barrier, 0, nullptr, 0, nullptr);
         launch(cmd);
         shader_to_transfer(cmd);
-        const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0,
-                                  .size = count_bytes};
+        const VkBufferCopy region{
+            .srcOffset = 0, .dstOffset = 0, .size = count_bytes};
         vkCmdCopyBuffer(cmd, _compact_counts.buffer, _compact_counts_io.buffer,
                         1, &region);
         transfer_to_host(cmd);
@@ -1348,14 +1349,15 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
     }
     const VkDeviceSize entry_bytes = total * 2 * sizeof(std::uint64_t);
     if (_compact_entries.size < entry_bytes) {
-        const VkDeviceSize grown =
-            std::max(entry_bytes, _compact_entries.size + _compact_entries.size / 2);
+        const VkDeviceSize grown = std::max(
+            entry_bytes, _compact_entries.size + _compact_entries.size / 2);
         destroy_buffer(_compact_entries);
         destroy_buffer(_compact_entries_rb);
-        _compact_entries =
-            create_buffer(grown, storage_and_transfer, BufferMemory::DeviceLocal);
-        _compact_entries_rb = create_buffer(
-            grown, VK_BUFFER_USAGE_TRANSFER_DST_BIT, BufferMemory::HostReadback);
+        _compact_entries = create_buffer(grown, storage_and_transfer,
+                                         BufferMemory::DeviceLocal);
+        _compact_entries_rb =
+            create_buffer(grown, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          BufferMemory::HostReadback);
         write_storage_descriptor(11, _compact_entries.buffer);
     }
 
@@ -1365,8 +1367,8 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                        VK_WHOLE_SIZE);
     push.flags = flag_compact_write;
     submit_once([&](VkCommandBuffer cmd) {
-        const VkBufferCopy in{.srcOffset = 0, .dstOffset = 0,
-                              .size = count_bytes};
+        const VkBufferCopy in{
+            .srcOffset = 0, .dstOffset = 0, .size = count_bytes};
         vkCmdCopyBuffer(cmd, _compact_counts_io.buffer, _compact_counts.buffer,
                         1, &in);
         const VkMemoryBarrier barrier{
@@ -1379,14 +1381,14 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                              &barrier, 0, nullptr, 0, nullptr);
         launch(cmd);
         shader_to_transfer(cmd);
-        const VkBufferCopy out{.srcOffset = 0, .dstOffset = 0,
-                               .size = entry_bytes};
-        vkCmdCopyBuffer(cmd, _compact_entries.buffer, _compact_entries_rb.buffer,
-                        1, &out);
+        const VkBufferCopy out{
+            .srcOffset = 0, .dstOffset = 0, .size = entry_bytes};
+        vkCmdCopyBuffer(cmd, _compact_entries.buffer,
+                        _compact_entries_rb.buffer, 1, &out);
         transfer_to_host(cmd);
     });
-    vmaInvalidateAllocation(_device.allocator, _compact_entries_rb.allocation, 0,
-                            VK_WHOLE_SIZE);
+    vmaInvalidateAllocation(_device.allocator, _compact_entries_rb.allocation,
+                            0, VK_WHOLE_SIZE);
     const std::span<const std::uint64_t> entries(
         static_cast<const std::uint64_t*>(checked_mapped(_compact_entries_rb)),
         static_cast<std::size_t>(total) * 2);
