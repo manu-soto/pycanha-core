@@ -111,6 +111,13 @@ class ExchangeAccumImpl {
     // maps (block-relative row = face - row_offset).
     void absorb_block(std::span<const std::uint32_t> block_emitters,
                       std::uint32_t row_offset);
+    // Tiled only: the same, from the block compacted on the device
+    // (SceneImpl::compact_block): emitter i's row is the counts[i] (column,
+    // cell) pairs of `entries` starting at pair first[i], columns ascending.
+    void absorb_compact(std::span<const std::uint32_t> block_emitters,
+                        std::span<const std::uint32_t> first,
+                        std::span<const std::uint32_t> counts,
+                        std::span<const std::uint64_t> entries);
     void record_batch(std::span<const std::uint32_t> emitters,
                       std::uint64_t rays_per_face);
     [[nodiscard]] SceneImpl& scene() const noexcept { return _scene; }

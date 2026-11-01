@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -174,6 +175,59 @@ TEST_CASE("radiative vulkan: batched emitter launches match one launch",
         const Traced traced = trace_all(scene);
         require_vf_identical(traced, reference);
         require_exchange_and_solar_identical(traced, reference);
+    }
+}
+
+// Tiled exchange blocks are compacted on the device before the readback
+// (SceneImpl::compact_block, kernels/compact.slang). Here a row is 2503 cells,
+// ten workgroup chunks of the compaction kernel; small odd tiles give many
+// blocks, an emitter subset leaves rows and blocks without emitters, and the
+// second batch merges into rows the first one filled. Each must equal the
+// Dense layout bit for bit.
+TEST_CASE("radiative vulkan: compacted Tiled exchange blocks match Dense",
+          "[radiative][gpu][vulkan][tiled]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const auto model = make_meshed_plates();
+    const std::array<std::array<float, 6>, 1> rows{gray_row(0.5F)};
+    const std::vector<int> pair_rows(num_pairs, 0);
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              make_materials(rows, pair_rows));
+    std::vector<std::uint32_t> subset;
+    for (std::uint32_t face = 0; face < num_faces; face += 3) {
+        subset.push_back(face);
+    }
+    for (const bool all_faces : {true, false}) {
+        const std::span<const std::uint32_t> emitters =
+            all_faces ? std::span<const std::uint32_t>{}
+                      : std::span<const std::uint32_t>(subset);
+        rad::TraceSettings settings;
+        settings.rays_per_face = 500;
+        rad::ExchangeAccumulator dense(scene, rad::Band::IR);
+        settings.seed = 3;
+        scene.accumulate_exchange(dense, settings, emitters);
+        settings.seed = 4;
+        scene.accumulate_exchange(dense, settings, emitters);
+        const rad::ExchangeResult reference = dense.result();
+        REQUIRE(reference.factors.nonZeros() > 0);
+        for (const std::uint32_t tile_rows : {7U, 256U, 1500U}) {
+            rad::ExchangeAccumulator tiled(
+                scene, rad::Band::IR,
+                rad::AccumConfig{.layout = rad::AccumLayout::Tiled,
+                                 .tile_rows = tile_rows,
+                                 .sparse_threshold = 0.0,
+                                 .triangulation = {}});
+            settings.seed = 3;
+            scene.accumulate_exchange(tiled, settings, emitters);
+            settings.seed = 4;
+            scene.accumulate_exchange(tiled, settings, emitters);
+            REQUIRE(csr_bit_identical(tiled.result().factors,
+                                      reference.factors));
+            REQUIRE(tiled.conservation_error() == 0);
+        }
     }
 }
 

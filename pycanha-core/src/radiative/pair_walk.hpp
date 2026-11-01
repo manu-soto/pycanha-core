@@ -122,6 +122,43 @@ class HostCountRow {
         _entries.swap(merged);
     }
 
+    // Adds a row the device already compacted: `entries` holds (column, cell)
+    // as interleaved u64 words, columns ascending, every cell non-zero. The
+    // same merge as add_dense over the dense row those entries came from, so
+    // the stored row is identical whichever way a block arrives.
+    void add_sparse(std::span<const std::uint64_t> entries) {
+        const std::size_t count = entries.size() / 2;
+        if (count == 0) {
+            return;
+        }
+        if (_entries.empty()) {
+            _entries.reserve(count);
+            for (std::size_t k = 0; k < count; ++k) {
+                _entries.emplace_back(static_cast<std::uint32_t>(entries[2 * k]),
+                                      entries[(2 * k) + 1]);
+            }
+            return;
+        }
+        std::vector<value_type> merged;
+        merged.reserve(_entries.size() + count);
+        auto it = _entries.begin();
+        for (std::size_t k = 0; k < count; ++k) {
+            const auto column = static_cast<std::uint32_t>(entries[2 * k]);
+            const std::uint64_t cell = entries[(2 * k) + 1];
+            while (it != _entries.end() && it->first < column) {
+                merged.push_back(*it++);
+            }
+            if (it != _entries.end() && it->first == column) {
+                merged.emplace_back(column, it->second + cell);
+                ++it;
+            } else {
+                merged.emplace_back(column, cell);
+            }
+        }
+        merged.insert(merged.end(), it, _entries.end());
+        _entries.swap(merged);
+    }
+
   private:
     [[nodiscard]] std::vector<value_type>::iterator lower(
         std::uint32_t column) {

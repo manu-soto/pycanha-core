@@ -228,6 +228,19 @@ void ExchangeAccumImpl::absorb_block(
     merge_block_rows(scratch, cols, block_emitters, row_offset, _host_rows);
 }
 
+void ExchangeAccumImpl::absorb_compact(
+    std::span<const std::uint32_t> block_emitters,
+    std::span<const std::uint32_t> first, std::span<const std::uint32_t> counts,
+    std::span<const std::uint64_t> entries) {
+    const unsigned threads =
+        worker_count({}, block_emitters.size(), entries.size());
+    parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
+        _host_rows[block_emitters[index]].add_sparse(entries.subspan(
+            static_cast<std::size_t>(first[index]) * 2,
+            static_cast<std::size_t>(counts[index]) * 2));
+    });
+}
+
 float ExchangeAccumImpl::prepare_batch(std::uint64_t rays_per_face) {
     if (_fp_scale <= 0.0) {
         _fp_scale = select_fp_scale(rays_per_face);
