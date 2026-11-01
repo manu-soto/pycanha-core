@@ -213,11 +213,11 @@ TEST_CASE("radiative vulkan: compacted Tiled exchange blocks match Dense",
         scene.accumulate_exchange(dense, settings, emitters);
         const rad::ExchangeResult reference = dense.result();
         REQUIRE(reference.factors.nonZeros() > 0);
-        for (const std::uint32_t tile_rows : {7U, 256U, 1500U}) {
+        for (const std::uint32_t block_rows : {7U, 256U, 1500U}) {
             rad::ExchangeAccumulator tiled(
                 scene, rad::Band::IR,
                 rad::AccumConfig{.layout = rad::AccumLayout::Tiled,
-                                 .tile_rows = tile_rows,
+                                 .tile_rows = block_rows,
                                  .sparse_threshold = 0.0,
                                  .triangulation = {}});
             settings.seed = 3;
