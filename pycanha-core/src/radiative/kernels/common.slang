@@ -24,7 +24,9 @@ public struct Push {
     public uint batch_seed;        // settings.seed + batch_index
     public uint max_bounces;
     public uint flags;             // bit0: normal-emission mode
-    public uint num_faces;    // total faces (accumulator row stride)
+    // Real columns of an accumulator row (its stride is this + 3): the
+    // faces, or for the exchange kernel's node rows the nodes + 1.
+    public uint num_faces;
     public float energy_threshold;
     public float fp_scale;         // fixed-point scale S of the deposits
     public float inv_fp_scale;     // 1/S
@@ -37,7 +39,8 @@ public struct Push {
     public float sun_dir_x;
     public float sun_dir_y;
     public float sun_dir_z;
-    public float _pad;
+    // Exchange kernel, node rows only: TriangulationConfig::exponent.
+    public float blend_exponent;
 };
 
 [[vk::push_constant]]

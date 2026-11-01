@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
+#include "pycanha-core/globals.hpp"
 #include "pycanha-core/radiative/materials.hpp"
 
 namespace pycanha::radiative {
@@ -118,6 +120,37 @@ struct ExchangeResult {
     // exchange it is not, so the debugging matrix carries the form that
     // cannot be reconstructed.
     std::optional<SparseMatrix> full_factors;
+    TraceStats stats;
+};
+
+// NodeExchangeResult carries one more virtual column than the face results:
+// after space, inactive and lost (at the offsets above) comes the energy the
+// node's faces sent to faces that belong to no node.
+inline constexpr std::int64_t num_node_virtual_columns = 4;
+inline constexpr std::int64_t unassigned_column_offset = 3;
+
+// The exchange result summed to nodes while it is traced
+// (NodeExchangeAccumulator). Rows are nodes, indexed by their position in
+// `nodes` (aggregate_nodes of the node numbers the accumulator was given);
+// columns are the same nodes plus the num_node_virtual_columns buckets.
+//
+// The stored value is ExchangeResult's H summed over the face pairs of each
+// node pair, H_mn = sum over faces i of m and j of n of H_ij, with the same
+// combination of each face pair's two directions: the matrix aggregate_matrix
+// makes of the face result, up to float rounding. Only the UPPER TRIANGLE of
+// the node columns is kept and the node diagonal is left out (radiation a
+// node exchanges with itself moves no heat), its total reported in
+// intra_node_total as aggregate_matrix reports it.
+//
+// The buckets are each node's own, as traced, with no transpose partner: the
+// summed space / inactive / lost columns of its faces' rows, and in the
+// unassigned column what landed on faces in no node (the forward estimate
+// alone, since those faces are not traced).
+struct NodeExchangeResult {
+    Band band = Band::IR;
+    std::vector<NodeNum> nodes;
+    SparseMatrix factors;
+    double intra_node_total = 0.0;
     TraceStats stats;
 };
 

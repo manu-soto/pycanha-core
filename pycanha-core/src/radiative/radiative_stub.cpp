@@ -31,6 +31,7 @@ class DeviceImpl {};
 class SceneImpl {};
 class VfAccumImpl {};
 class ExchangeAccumImpl {};
+class NodeExchangeAccumImpl {};
 class SolarAccumImpl {};
 }  // namespace detail
 
@@ -77,6 +78,12 @@ void RadiativeScene::accumulate_vf(VfAccumulator& /*acc*/,
     throw_unavailable();
 }
 void RadiativeScene::accumulate_exchange(ExchangeAccumulator& /*acc*/,
+                                         const TraceSettings& /*settings*/,
+                                         std::span<const std::uint32_t>
+                                         /*emitters*/) {
+    throw_unavailable();
+}
+void RadiativeScene::accumulate_exchange(NodeExchangeAccumulator& /*acc*/,
                                          const TraceSettings& /*settings*/,
                                          std::span<const std::uint32_t>
                                          /*emitters*/) {
@@ -141,8 +148,32 @@ void SolarAccumulator::reset() { throw_unavailable(); }
 SolarResult SolarAccumulator::result() const { throw_unavailable(); }
 detail::SolarAccumImpl& SolarAccumulator::impl() noexcept { return *_impl; }
 
+NodeExchangeAccumulator::NodeExchangeAccumulator(
+    const RadiativeScene& /*scene*/, Band /*band*/,
+    std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/) {
+    throw_unavailable();
+}
+NodeExchangeAccumulator::~NodeExchangeAccumulator() = default;
+NodeExchangeAccumulator::NodeExchangeAccumulator(
+    NodeExchangeAccumulator&&) noexcept = default;
+NodeExchangeAccumulator& NodeExchangeAccumulator::operator=(
+    NodeExchangeAccumulator&&) noexcept = default;
+void NodeExchangeAccumulator::reset() { throw_unavailable(); }
+NodeExchangeResult NodeExchangeAccumulator::result() const {
+    throw_unavailable();
+}
+detail::NodeExchangeAccumImpl& NodeExchangeAccumulator::impl() noexcept {
+    return *_impl;
+}
+
 MemoryEstimate estimate_memory(const RadiativeScene& /*scene*/,
                                const AccumConfig& /*config*/) {
+    throw_unavailable();
+}
+
+MemoryEstimate estimate_node_memory(const RadiativeScene& /*scene*/,
+                                    std::uint64_t /*num_nodes*/,
+                                    const AccumConfig& /*config*/) {
     throw_unavailable();
 }
 

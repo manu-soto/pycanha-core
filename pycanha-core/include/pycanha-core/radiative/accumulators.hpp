@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <span>
 
+#include "pycanha-core/globals.hpp"
 #include "pycanha-core/radiative/results.hpp"
 #include "pycanha-core/radiative/settings.hpp"
 
@@ -12,6 +14,7 @@ class RadiativeScene;
 namespace detail {
 class VfAccumImpl;
 class ExchangeAccumImpl;
+class NodeExchangeAccumImpl;
 class SolarAccumImpl;
 }  // namespace detail
 
@@ -71,6 +74,47 @@ class ExchangeAccumulator {
 
   private:
     std::unique_ptr<detail::ExchangeAccumImpl> _impl;
+};
+
+// Exchange factors summed to nodes while they are traced. Where
+// ExchangeAccumulator holds face x face cells and aggregate_matrix sums them
+// to nodes afterwards, this one holds node x node cells: a face deposits
+// into the row and column of its node, scaled by the factors the face
+// assembly would apply to it (its emissive area, and the weight that
+// combines a face pair's two directions). The result is the aggregated face
+// result up to float rounding, while the GPU buffer and the host memory
+// follow the node pairs instead of the face pairs, and stop growing with the
+// rays.
+//
+// node_numbers: one per scene face, NO_NODE for a face in no node, as
+// aggregate_matrix takes them. Faces in no node are not traced; energy that
+// lands on them is reported in the unassigned column.
+//
+// Requirements, checked: every batch traces the same emitters (rays may
+// differ between batches but not between faces, which is what lets the
+// face pair weights be known while tracing); TriangulationMode None or
+// RayDensity (ConstrainedLeastSquares is a projection over the whole face
+// matrix); keep_full_matrix off. RayDensity weighs the two directions by
+// each face's A / N, which with the same N for every emitter is the ratio of
+// the faces' areas, known before tracing. Vulkan only.
+class NodeExchangeAccumulator {
+  public:
+    NodeExchangeAccumulator(const RadiativeScene& scene, Band band,
+                            std::span<const NodeNum> node_numbers,
+                            AccumConfig config = {});
+    ~NodeExchangeAccumulator();
+    NodeExchangeAccumulator(NodeExchangeAccumulator&&) noexcept;
+    NodeExchangeAccumulator& operator=(NodeExchangeAccumulator&&) noexcept;
+    NodeExchangeAccumulator(const NodeExchangeAccumulator&) = delete;
+    NodeExchangeAccumulator& operator=(const NodeExchangeAccumulator&) = delete;
+
+    void reset();
+    [[nodiscard]] NodeExchangeResult result() const;
+
+    [[nodiscard]] detail::NodeExchangeAccumImpl& impl() noexcept;
+
+  private:
+    std::unique_ptr<detail::NodeExchangeAccumImpl> _impl;
 };
 
 // Solar-absorption accumulator: per-face direct/total energy vectors

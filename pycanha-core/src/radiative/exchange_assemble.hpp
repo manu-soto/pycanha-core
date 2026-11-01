@@ -16,6 +16,7 @@
 // assembly and lives in pair_walk.hpp. What stays here is only what knows
 // that a cell is fixed-point deposited energy.
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <variant>
@@ -67,6 +68,33 @@ struct ExchangeInputs {
 [[nodiscard]] ExchangeResult assemble_exchange(
     const ExchangeInputs& in, const AccumConfig& config,
     const AssemblyTuning& tuning = {});
+
+// Node rows (NodeExchangeAccumulator). The kernel has already summed the
+// cells to nodes and scaled every deposit by its emission share and pair
+// weight, so what is left is a unit per row, the transpose sum that makes
+// the upper triangle, and the buckets. A row's cells (stride num_nodes + 4):
+// the node columns, then the faces in no node, space, inactive, lost.
+struct NodeExchangeInputs {
+    ExchangeCellSource cells;
+    std::size_t num_nodes = 0;
+    // Per node: the largest A eps of its faces, which a deposit was divided
+    // by in the kernel, and the summed A eps (the threshold's divisor).
+    std::span<const double> node_scale;
+    std::span<const double> node_emissive_area;
+    // The rays every emitter sent, and the summed A eps of the emitters
+    // (the lost-energy fraction's denominator).
+    std::uint64_t rays_per_face = 0;
+    double emitted_area = 0.0;
+    double fp_scale = 0.0;
+    Band band = Band::IR;
+};
+
+// `nodes`, total_rays and rays_per_face are filled in by the caller. The
+// lost-energy fraction is the lost H over the emitted A eps (the face result
+// takes it over the rays); the per-entry standard errors and the reciprocity
+// residual are face-pair quantities and stay 0.
+[[nodiscard]] NodeExchangeResult assemble_node_exchange(
+    const NodeExchangeInputs& in, const AccumConfig& config);
 
 // Largest deviation of a row's total deposits from the energy that row
 // emitted, in fixed-point units. Everything wraps mod 2^64 — the identity

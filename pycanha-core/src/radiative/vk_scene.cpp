@@ -50,6 +50,9 @@ constexpr std::uint32_t num_bindings = 12;
 // Host mirrors of the kernel flag bits in common.slang.
 constexpr std::uint32_t flag_normal_emission = 1;
 constexpr std::uint32_t flag_solar_band = 2;
+// exchange.slang's node rows (64 is compact.slang's write pass).
+constexpr std::uint32_t flag_node_rows = 128;
+constexpr std::uint32_t flag_node_forward_only = 256;
 
 // Tolerated float slack when validating that absorptivity + specular +
 // transmission of a band does not exceed one.
@@ -1131,8 +1134,77 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
             dispatch_rows(kernel, block, settings);
             // The block's non-zero cells only, compacted on the device; read
             // back whole when that cannot be done (same result either way).
-            if (!compact_block(acc, block, row_offset)) {
+            if (!compact_block(acc, block, row_offset, _num_faces)) {
                 acc.absorb_block(block, row_offset);
+            }
+        }
+    }
+
+    acc.record_batch(list, settings.rays_per_face);
+}
+
+void SceneImpl::accumulate_exchange(NodeExchangeAccumImpl& acc,
+                                    const TraceSettings& settings,
+                                    std::span<const std::uint32_t> emitters) {
+    // The emitters that belong to a node, ordered by node so that a block of
+    // node rows is one run of the list. The accumulator checks that it is the
+    // set every earlier batch traced, and fixes the face weights on the first.
+    const std::vector<std::uint32_t> list =
+        acc.prepare_emitters(resolve_emitters(emitters, settings));
+    if (list.empty()) {
+        return;
+    }
+    const float fp_scale = acc.prepare_batch(settings.rays_per_face);
+
+    KernelDispatch kernel;
+    kernel.pipeline = _exchange_pipeline;
+    kernel.flags = (acc.band() == Band::Solar ? flag_solar_band : 0U) |
+                   flag_node_rows |
+                   (acc.forward_only() ? flag_node_forward_only : 0U);
+    if (settings.normal_emission) {
+        kernel.flags |= flag_normal_emission;
+    }
+    kernel.fp_scale = fp_scale;
+    kernel.columns = acc.columns();
+    kernel.blend_exponent = acc.blend_exponent();
+    // compact_block points 9-11 at its own buffers, so every block rebinds.
+    const auto bind = [this, &acc] {
+        write_storage_descriptor(9, acc.buffer());
+        write_storage_descriptor(10, acc.face_columns_buffer());
+        write_storage_descriptor(11, acc.face_weights_buffer());
+    };
+
+    if (acc.layout() == AccumLayout::Dense) {
+        bind();
+        dispatch_rows(kernel, list, settings);
+    } else {
+        const std::uint32_t tile_rows = acc.tile_rows();
+        std::size_t first = 0;
+        for (std::uint32_t row_offset = 0;
+             row_offset < acc.num_nodes() && first < list.size();
+             row_offset += tile_rows) {
+            std::size_t last = first;
+            std::vector<std::uint32_t> rows;  // the block's nodes, ascending
+            while (last < list.size() &&
+                   acc.row_of(list[last]) - row_offset < tile_rows) {
+                const std::uint32_t row = acc.row_of(list[last]);
+                if (rows.empty() || rows.back() != row) {
+                    rows.push_back(row);
+                }
+                ++last;
+            }
+            if (last == first) {
+                continue;
+            }
+            const std::span<const std::uint32_t> block(list.data() + first,
+                                                       last - first);
+            first = last;
+            acc.clear_block_scratch();
+            kernel.row_offset = row_offset;
+            bind();
+            dispatch_rows(kernel, block, settings);
+            if (!compact_block(acc, rows, row_offset, kernel.columns)) {
+                acc.absorb_block(rows, row_offset);
             }
         }
     }
@@ -1235,9 +1307,10 @@ void SceneImpl::upload_emitters(std::span<const std::uint32_t> emitters) {
     write_storage_descriptor(4, _emitters_buf.buffer);
 }
 
-bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
+template <class Accumulator>
+bool SceneImpl::compact_block(Accumulator& acc,
                               std::span<const std::uint32_t> block,
-                              std::uint32_t row_offset) {
+                              std::uint32_t row_offset, std::uint32_t columns) {
     if (_compact_pipeline == VK_NULL_HANDLE || block.empty() ||
         block.size() > _device.max_dispatch_emitters) {
         return false;
@@ -1275,7 +1348,7 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
     PushConstants push{};
     push.row_offset = row_offset;
     push.num_emitters = rows;
-    push.num_faces = _num_faces;
+    push.num_faces = columns;
     push.fp_scale = 1.0F;
     push.inv_fp_scale = 1.0F;
     constexpr std::uint32_t flag_compact_write = 64U;  // compact.slang
@@ -1409,13 +1482,13 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
         .batch_seed = settings.seed,
         .max_bounces = settings.max_bounces,
         .flags = kernel.flags,
-        .num_faces = _num_faces,
+        .num_faces = kernel.columns != 0 ? kernel.columns : _num_faces,
         .energy_threshold = settings.energy_threshold,
         .fp_scale = kernel.fp_scale,
         .inv_fp_scale = 1.0F / kernel.fp_scale,
         .ray_tmin_scale = _ray_tmin_scale,
         .sun_dir = kernel.sun_dir,
-        .pad = 0.0F};
+        .blend_exponent = kernel.blend_exponent};
 
     const std::uint64_t rays_per_chunk =
         std::max<std::uint64_t>(1, max_rays_per_chunk_total / emitters.size());

@@ -28,4 +28,12 @@ struct MemoryEstimate {
 [[nodiscard]] MemoryEstimate estimate_memory(const RadiativeScene& scene,
                                              const AccumConfig& config = {});
 
+// The same for a NodeExchangeAccumulator over `num_nodes` nodes: its rows are
+// nodes and its row stride num_nodes + 1 + 3 (the faces in no node share one
+// column), so the dense and per-row figures follow the node count; the
+// scene cost is the scene's.
+[[nodiscard]] MemoryEstimate estimate_node_memory(
+    const RadiativeScene& scene, std::uint64_t num_nodes,
+    const AccumConfig& config = {});
+
 }  // namespace pycanha::radiative

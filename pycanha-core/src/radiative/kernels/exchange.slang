@@ -26,6 +26,125 @@ import common;
 // deposits go through fp_add / fp_add_raw, never a raw InterlockedAdd here.
 [[vk::binding(9, 0)]] FpBuffer acc;
 
+// Node rows (NodeExchangeAccumulator; SPIR-V only, Metal keeps face rows).
+// The accumulator is node x node: a face's row and column are its node's
+// (node_column; the faces in no node share column num_nodes, and
+// pc.num_faces carries num_nodes + 1 so that the stride and the virtual
+// columns follow). Every deposit is scaled here by what the face assembly
+// would apply to it: the emitting face's share of its node's emission (its
+// A eps over the largest A eps among the node's faces), and on a real column
+// the weight that combines the face pair's two directions, which on a trace
+// where every emitter sends the same rays is fixed by the two faces' areas.
+// The sum of the scaled deposits over the face pairs of two nodes is then
+// the aggregated face result, up to float rounding, without ever holding a
+// face x face cell.
+static const uint FLAG_NODE_ROWS = 128u;
+// Node rows, TriangulationMode::None: a face pair keeps the estimate traced
+// from its lower-numbered face, as the face assembly does.
+static const uint FLAG_NODE_FORWARD_ONLY = 256u;
+
+#if !defined(PYCANHA_METAL_BACKEND)
+[[vk::binding(10, 0)]] StructuredBuffer<uint> node_column;
+// x: the face's emission share; y + z: the u its blend weight reads (the
+// face's area when it emits, 0 when it does not) as a float and the rest of
+// the double below it; w unused.
+[[vk::binding(11, 0)]] StructuredBuffer<float4> node_weight;
+
+// The fixed-point amount times a share in [0, 1], in integers: the share as a
+// 30-bit fraction q (the float share times 2^30, exact for shares of 2^-7 and
+// up), the amount's two 32-bit halves multiplied by it, the low product
+// rounded to nearest. A share of 1 returns the amount itself, bit for bit.
+// Through floats it did not, on an RTX 4070: float(amount) * share made a
+// directly escaping ray's S = 2^47 into S + 2^32 (the space column 2^-15
+// high), and the same in 32-bit halves still changed some small balances (the
+// lost column's sum came out 12 times its value); every conversion left here
+// is of a value below 2^31.
+uint64_t scaled(uint64_t amount, float share) {
+    uint64_t q = uint64_t(uint(share * 1073741824.0 + 0.5));
+    uint64_t high = (amount >> 32) * q;            // below 2^56 for amount < 2^58
+    uint64_t low = (amount & 0xFFFFFFFFull) * q;   // below 2^62
+    return (high << 2) + ((low + 536870912ull) >> 30);
+}
+
+// The same for a balance that may be negative in wrapping u64 (the lost
+// column's Russian-roulette withdrawals): its magnitude scaled, the sign kept.
+uint64_t scaled_signed(uint64_t amount, float share) {
+    if ((amount >> 63) == uint64_t(0)) {
+        return scaled(amount, share);
+    }
+    return uint64_t(0) - scaled(uint64_t(0) - amount, share);
+}
+
+// Weight of the deposits `face` makes on `hit_face` in the combined pair
+// (pair_walk's WeightTable::forward_weight, in float): its own estimate
+// alone when the partner never emits or for a self-hit. u and v come as a
+// float and its remainder, so that the difference of two nearly equal areas
+// keeps the double's digits: |ratio|^n has an infinite slope at 0, and with
+// the areas rounded to floats two equal-looking faces (a cube's cells) came
+// out at ratio ~3e-8 and weights 1e-3 off.
+float blend_weight(uint face, float2 u, uint hit_face) {
+    if (hit_face == face) {
+        return 1.0;
+    }
+    if ((pc.flags & FLAG_NODE_FORWARD_ONLY) != 0u) {
+        return face < hit_face ? 1.0 : 0.0;
+    }
+    float2 v = node_weight[hit_face].yz;
+    if (!(v.x > 0.0)) {
+        return 1.0;
+    }
+    float ratio = ((v.x - u.x) + (v.y - u.y)) / (u.x + v.x);
+    float magnitude = pow(abs(ratio), pc.blend_exponent);
+    return 0.5 * (1.0 + (ratio < 0.0 ? -magnitude : magnitude));
+}
+#endif
+
+// One deposit of `face`'s path onto `hit_face`: into the face's row at the
+// hit face's column, or in node rows into the nodes' cell, scaled.
+// `emitter` is node_weight[face] (unused in face rows).
+void deposit(uint row_base, uint face, float4 emitter, uint hit_face,
+             uint64_t amount) {
+#if !defined(PYCANHA_METAL_BACKEND)
+    if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
+        uint column = node_column[hit_face];
+        // The faces in no node (the last real column) are never traced:
+        // there is no other direction to combine with, only the share.
+        float weight = column + 1u == pc.num_faces
+                           ? 1.0
+                           : blend_weight(face, emitter.yz, hit_face);
+        uint64_t value = scaled(amount, emitter.x * weight);
+        if (value != uint64_t(0)) {
+            fp_add_raw(acc, row_base + column, value);
+        }
+        return;
+    }
+#endif
+    fp_add_raw(acc, row_base + hit_face, amount);
+}
+
+// A balance that ends in a virtual column, as the row holds it: as traced, or
+// in node rows times the emitting face's share alone (a virtual column has no
+// partner direction).
+uint64_t tail(uint64_t amount, float4 emitter) {
+#if !defined(PYCANHA_METAL_BACKEND)
+    if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
+        return scaled(amount, emitter.x);
+    }
+#endif
+    return amount;
+}
+
+// The same for a wrapping balance that may be negative (a Russian-roulette
+// withdrawal from the lost column).
+uint64_t tail_signed(uint64_t amount, float4 emitter) {
+#if !defined(PYCANHA_METAL_BACKEND)
+    if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
+        return scaled_signed(amount, emitter.x);
+    }
+#endif
+    return amount;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csMain(uint3 gid: SV_DispatchThreadID) {
@@ -41,8 +160,16 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     uint ray_index = pc.ray_index_offset + ray_local;
     Rng rng = rng_init(face, ray_index, pc.batch_seed);
     uint stride = pc.num_faces + 3u;
+    uint row = face;
+    float4 emitter = float4(1.0, 0.0, 0.0, 0.0);
+#if !defined(PYCANHA_METAL_BACKEND)
+    if ((pc.flags & FLAG_NODE_ROWS) != 0u) {
+        row = node_column[face];
+        emitter = node_weight[face];
+    }
+#endif
     // Block-relative accumulator row base.
-    uint row_base = (face - pc.row_offset) * stride;
+    uint row_base = (row - pc.row_offset) * stride;
     uint space_col = pc.num_faces;
     uint inactive_col = pc.num_faces + 1u;
     uint lost_col = pc.num_faces + 2u;
@@ -58,7 +185,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     for (uint bounce = 0u; bounce < pc.max_bounces; ++bounce) {
         Hit hit = trace_ray(origin, dir);
         if (hit.miss) {
-            fp_add_raw(acc, row_base + space_col, fp_remaining);
+            fp_add_raw(acc, row_base + space_col, tail(fp_remaining, emitter));
             return;
         }
         // One load per bounce: the flags and the material index live in the
@@ -68,13 +195,14 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         if ((record & FACE_FLAG_PLANET) != 0u) {
             // The planet absorbs every band; its radiance is CPU
             // post-processing over the VF matrix, not a kernel concern.
-            fp_add_raw(acc, row_base + hit.face, fp_remaining);
+            deposit(row_base, face, emitter, hit.face, fp_remaining);
             return;
         }
         if ((record & FACE_FLAG_ACTIVE) == 0u) {
             // Non-radiative face: absorbed, but scored apart so the
             // consumer can decide what that energy means.
-            fp_add_raw(acc, row_base + inactive_col, fp_remaining);
+            fp_add_raw(acc, row_base + inactive_col,
+                       tail(fp_remaining, emitter));
             return;
         }
 
@@ -83,7 +211,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         float t;
         if (!band_properties_of(record, a, s, t)) {
             // No material assigned: blackbody, absorbs the remainder.
-            fp_add_raw(acc, row_base + hit.face, fp_remaining);
+            deposit(row_base, face, emitter, hit.face, fp_remaining);
             return;
         }
         // Diffuse reflectance is the clamped remainder; never renormalize
@@ -94,7 +222,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         // would bias the estimate).
         float energy_after = energy * (1.0 - a);
         uint64_t fp_after = to_fp(energy_after);
-        fp_add_raw(acc, row_base + hit.face, fp_remaining - fp_after);
+        deposit(row_base, face, emitter, hit.face, fp_remaining - fp_after);
         fp_remaining = fp_after;
         energy = energy_after;
         if (fp_remaining == uint64_t(0)) {
@@ -109,11 +237,12 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
                 // Wrapping subtraction: the boost's fixed-point gain is
                 // withdrawn from the lost column to keep the row balance
                 // exact.
-                fp_add_raw(acc, row_base + lost_col, fp_remaining - fp_boost);
+                fp_add_raw(acc, row_base + lost_col,
+                           tail_signed(fp_remaining - fp_boost, emitter));
                 fp_remaining = fp_boost;
                 energy = pc.energy_threshold;
             } else {
-                fp_add_raw(acc, row_base + lost_col, fp_remaining);
+                fp_add_raw(acc, row_base + lost_col, tail(fp_remaining, emitter));
                 return;
             }
         }
@@ -133,5 +262,5 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         }
     }
     // The max_bounces safety bound killed the ray.
-    fp_add_raw(acc, row_base + lost_col, fp_remaining);
+    fp_add_raw(acc, row_base + lost_col, tail(fp_remaining, emitter));
 }
