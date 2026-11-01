@@ -58,9 +58,10 @@ constexpr std::uint32_t workgroup_size_x = 64;
 #if defined(_MSC_VER)
     char* value = nullptr;
     std::size_t length = 0;
-    const bool one = _dupenv_s(&value, &length, name) == 0 && value != nullptr &&
-                     std::string(value) == "1";
-    std::free(value);  // NOLINT(cppcoreguidelines-no-malloc): _dupenv_s's buffer
+    const bool one = _dupenv_s(&value, &length, name) == 0 &&
+                     value != nullptr && std::string(value) == "1";
+    std::free(
+        value);  // NOLINT(cppcoreguidelines-no-malloc): _dupenv_s's buffer
     return one;
 #else
     const char* value = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
@@ -79,6 +80,9 @@ constexpr std::uint32_t flag_qmc = 4;
 constexpr std::uint32_t flag_sun_plane = 8;
 constexpr std::uint32_t flag_scene_has_planet = 16;
 constexpr std::uint32_t flag_robust_offset = 32;
+// exchange.slang's node rows (64 is compact.slang's write pass).
+constexpr std::uint32_t flag_node_rows = 128;
+constexpr std::uint32_t flag_node_forward_only = 256;
 
 // The per-dispatch flags every kernel takes from the settings: the sampler
 // and the ray-origin offset.
@@ -1116,9 +1120,9 @@ void SceneImpl::accumulate_vf(VfAccumImpl& acc, const TraceSettings& settings,
     }
 
     KernelDispatch kernel;
-    kernel.pipeline = pipeline_for(_vf_pipeline, _vf_pipeline_qmc,
-                                   kernels::vf_qmc_spv,
-                                   "VF QMC pipeline creation", settings);
+    kernel.pipeline =
+        pipeline_for(_vf_pipeline, _vf_pipeline_qmc, kernels::vf_qmc_spv,
+                     "VF QMC pipeline creation", settings);
     kernel.flags = (settings.normal_emission ? flag_normal_emission : 0U) |
                    sampler_flags(settings);
     write_storage_descriptor(9, acc.buffer());
@@ -1164,10 +1168,9 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
     const float fp_scale = acc.prepare_batch(settings.rays_per_face);
 
     KernelDispatch kernel;
-    kernel.pipeline =
-        pipeline_for(_exchange_pipeline, _exchange_pipeline_qmc,
-                     kernels::exchange_qmc_spv, "exchange QMC pipeline creation",
-                     settings);
+    kernel.pipeline = pipeline_for(_exchange_pipeline, _exchange_pipeline_qmc,
+                                   kernels::exchange_qmc_spv,
+                                   "exchange QMC pipeline creation", settings);
     kernel.flags = (acc.band() == Band::Solar ? flag_solar_band : 0U) |
                    sampler_flags(settings);
     if (settings.normal_emission) {
@@ -1198,8 +1201,79 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
             dispatch_rows(kernel, block, settings);
             // The block's non-zero cells only, compacted on the device; read
             // back whole when that cannot be done (same result either way).
-            if (!compact_block(acc, block, row_offset)) {
+            if (!compact_block(acc, block, row_offset, _num_faces)) {
                 acc.absorb_block(block, row_offset);
+            }
+        }
+    }
+
+    acc.record_batch(list, settings.rays_per_face);
+}
+
+void SceneImpl::accumulate_exchange(NodeExchangeAccumImpl& acc,
+                                    const TraceSettings& settings,
+                                    std::span<const std::uint32_t> emitters) {
+    // The emitters that belong to a node, ordered by node so that a block of
+    // node rows is one run of the list. The accumulator checks that it is the
+    // set every earlier batch traced, and fixes the face weights on the first.
+    const std::vector<std::uint32_t> list =
+        acc.prepare_emitters(resolve_emitters(emitters, settings));
+    if (list.empty()) {
+        return;
+    }
+    const float fp_scale = acc.prepare_batch(settings.rays_per_face);
+
+    KernelDispatch kernel;
+    kernel.pipeline = pipeline_for(_exchange_pipeline, _exchange_pipeline_qmc,
+                                   kernels::exchange_qmc_spv,
+                                   "exchange QMC pipeline creation", settings);
+    kernel.flags = (acc.band() == Band::Solar ? flag_solar_band : 0U) |
+                   sampler_flags(settings) | flag_node_rows |
+                   (acc.forward_only() ? flag_node_forward_only : 0U);
+    if (settings.normal_emission) {
+        kernel.flags |= flag_normal_emission;
+    }
+    kernel.fp_scale = fp_scale;
+    kernel.columns = acc.columns();
+    kernel.blend_exponent = acc.blend_exponent();
+    // compact_block points 9-11 at its own buffers, so every block rebinds.
+    const auto bind = [this, &acc] {
+        write_storage_descriptor(9, acc.buffer());
+        write_storage_descriptor(10, acc.face_columns_buffer());
+        write_storage_descriptor(11, acc.face_weights_buffer());
+    };
+
+    if (acc.layout() == AccumLayout::Dense) {
+        bind();
+        dispatch_rows(kernel, list, settings);
+    } else {
+        const std::uint32_t tile_rows = acc.tile_rows();
+        std::size_t first = 0;
+        for (std::uint32_t row_offset = 0;
+             row_offset < acc.num_nodes() && first < list.size();
+             row_offset += tile_rows) {
+            std::size_t last = first;
+            std::vector<std::uint32_t> rows;  // the block's nodes, ascending
+            while (last < list.size() &&
+                   acc.row_of(list[last]) - row_offset < tile_rows) {
+                const std::uint32_t row = acc.row_of(list[last]);
+                if (rows.empty() || rows.back() != row) {
+                    rows.push_back(row);
+                }
+                ++last;
+            }
+            if (last == first) {
+                continue;
+            }
+            const std::span<const std::uint32_t> block(list.data() + first,
+                                                       last - first);
+            first = last;
+            acc.clear_block_scratch();
+            kernel.row_offset = row_offset;
+            bind();
+            dispatch_rows(kernel, block, settings);
+            if (!compact_block(acc, rows, row_offset, kernel.columns)) {
+                acc.absorb_block(rows, row_offset);
             }
         }
     }
@@ -1258,8 +1332,7 @@ void SceneImpl::accumulate_solar_plane(const SolarState& sun,
     const double sign = d.z() >= 0.0 ? 1.0 : -1.0;
     const double a = -1.0 / (sign + d.z());
     const double b = d.x() * d.y() * a;
-    const Vector3D e1(1.0 + sign * d.x() * d.x() * a, sign * b,
-                      -sign * d.x());
+    const Vector3D e1(1.0 + sign * d.x() * d.x() * a, sign * b, -sign * d.x());
     const Vector3D e2(b, sign + d.y() * d.y() * a, -d.y());
 
     double lo1 = std::numeric_limits<double>::infinity();
@@ -1280,16 +1353,15 @@ void SceneImpl::accumulate_solar_plane(const SolarState& sun,
         }
         const auto& rows = _instances_host[p].tf_rows;
         for (int corner = 0; corner < 8; ++corner) {
-            const Vector3D local((corner & 1) != 0 ? box.max().x()
-                                                   : box.min().x(),
-                                 (corner & 2) != 0 ? box.max().y()
-                                                   : box.min().y(),
-                                 (corner & 4) != 0 ? box.max().z()
-                                                   : box.min().z());
+            const Vector3D local(
+                (corner & 1) != 0 ? box.max().x() : box.min().x(),
+                (corner & 2) != 0 ? box.max().y() : box.min().y(),
+                (corner & 4) != 0 ? box.max().z() : box.min().z());
             Vector3D world;
             for (std::size_t r = 0; r < 3; ++r) {
                 world(static_cast<Eigen::Index>(r)) =
-                    rows.at(r).at(0) * local.x() + rows.at(r).at(1) * local.y() +
+                    rows.at(r).at(0) * local.x() +
+                    rows.at(r).at(1) * local.y() +
                     rows.at(r).at(2) * local.z() + rows.at(r).at(3);
             }
             lo1 = std::min(lo1, world.dot(e1));
@@ -1411,9 +1483,10 @@ void SceneImpl::upload_emitters(std::span<const std::uint32_t> emitters) {
     write_storage_descriptor(4, _emitters_buf.buffer);
 }
 
-bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
+template <class Accumulator>
+bool SceneImpl::compact_block(Accumulator& acc,
                               std::span<const std::uint32_t> block,
-                              std::uint32_t row_offset) {
+                              std::uint32_t row_offset, std::uint32_t columns) {
     if (_compact_disabled || _compact_pipeline == VK_NULL_HANDLE ||
         block.empty() || block.size() > _device.max_dispatch_emitters) {
         return false;
@@ -1432,15 +1505,16 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
         destroy_buffer(_compact_counts_io);
         _compact_counts = create_buffer(count_bytes, storage_and_transfer,
                                         BufferMemory::DeviceLocal);
-        _compact_counts_io =
-            create_buffer(count_bytes, transfer_both, BufferMemory::HostReadback);
+        _compact_counts_io = create_buffer(count_bytes, transfer_both,
+                                           BufferMemory::HostReadback);
     }
     if (_compact_entries.buffer == VK_NULL_HANDLE) {
         constexpr VkDeviceSize initial = VkDeviceSize{1} << 20U;
         _compact_entries = create_buffer(initial, storage_and_transfer,
                                          BufferMemory::DeviceLocal);
-        _compact_entries_rb = create_buffer(
-            initial, VK_BUFFER_USAGE_TRANSFER_DST_BIT, BufferMemory::HostReadback);
+        _compact_entries_rb =
+            create_buffer(initial, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          BufferMemory::HostReadback);
     }
     upload_emitters(block);
     write_storage_descriptor(9, acc.buffer());
@@ -1450,7 +1524,7 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
     PushConstants push{};
     push.row_offset = row_offset;
     push.num_emitters = rows;
-    push.num_faces = _num_faces;
+    push.num_faces = columns;
     push.fp_scale = 1.0F;
     push.inv_fp_scale = 1.0F;
     constexpr std::uint32_t flag_compact_write = 64U;  // compact.slang
@@ -1499,8 +1573,8 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                              &barrier, 0, nullptr, 0, nullptr);
         launch(cmd);
         shader_to_transfer(cmd);
-        const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0,
-                                  .size = count_bytes};
+        const VkBufferCopy region{
+            .srcOffset = 0, .dstOffset = 0, .size = count_bytes};
         vkCmdCopyBuffer(cmd, _compact_counts.buffer, _compact_counts_io.buffer,
                         1, &region);
         transfer_to_host(cmd);
@@ -1524,14 +1598,15 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
     }
     const VkDeviceSize entry_bytes = total * 2 * sizeof(std::uint64_t);
     if (_compact_entries.size < entry_bytes) {
-        const VkDeviceSize grown =
-            std::max(entry_bytes, _compact_entries.size + _compact_entries.size / 2);
+        const VkDeviceSize grown = std::max(
+            entry_bytes, _compact_entries.size + _compact_entries.size / 2);
         destroy_buffer(_compact_entries);
         destroy_buffer(_compact_entries_rb);
-        _compact_entries =
-            create_buffer(grown, storage_and_transfer, BufferMemory::DeviceLocal);
-        _compact_entries_rb = create_buffer(
-            grown, VK_BUFFER_USAGE_TRANSFER_DST_BIT, BufferMemory::HostReadback);
+        _compact_entries = create_buffer(grown, storage_and_transfer,
+                                         BufferMemory::DeviceLocal);
+        _compact_entries_rb =
+            create_buffer(grown, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          BufferMemory::HostReadback);
         write_storage_descriptor(11, _compact_entries.buffer);
     }
 
@@ -1541,8 +1616,8 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                        VK_WHOLE_SIZE);
     push.flags = flag_compact_write;
     submit_once([&](VkCommandBuffer cmd) {
-        const VkBufferCopy in{.srcOffset = 0, .dstOffset = 0,
-                              .size = count_bytes};
+        const VkBufferCopy in{
+            .srcOffset = 0, .dstOffset = 0, .size = count_bytes};
         vkCmdCopyBuffer(cmd, _compact_counts_io.buffer, _compact_counts.buffer,
                         1, &in);
         const VkMemoryBarrier barrier{
@@ -1555,14 +1630,14 @@ bool SceneImpl::compact_block(ExchangeAccumImpl& acc,
                              &barrier, 0, nullptr, 0, nullptr);
         launch(cmd);
         shader_to_transfer(cmd);
-        const VkBufferCopy out{.srcOffset = 0, .dstOffset = 0,
-                               .size = entry_bytes};
-        vkCmdCopyBuffer(cmd, _compact_entries.buffer, _compact_entries_rb.buffer,
-                        1, &out);
+        const VkBufferCopy out{
+            .srcOffset = 0, .dstOffset = 0, .size = entry_bytes};
+        vkCmdCopyBuffer(cmd, _compact_entries.buffer,
+                        _compact_entries_rb.buffer, 1, &out);
         transfer_to_host(cmd);
     });
-    vmaInvalidateAllocation(_device.allocator, _compact_entries_rb.allocation, 0,
-                            VK_WHOLE_SIZE);
+    vmaInvalidateAllocation(_device.allocator, _compact_entries_rb.allocation,
+                            0, VK_WHOLE_SIZE);
     const std::span<const std::uint64_t> entries(
         static_cast<const std::uint64_t*>(checked_mapped(_compact_entries_rb)),
         static_cast<std::size_t>(total) * 2);
@@ -1583,13 +1658,13 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
         .batch_seed = settings.seed,
         .max_bounces = settings.max_bounces,
         .flags = kernel.flags,
-        .num_faces = _num_faces,
+        .num_faces = kernel.columns != 0 ? kernel.columns : _num_faces,
         .energy_threshold = settings.energy_threshold,
         .fp_scale = kernel.fp_scale,
         .inv_fp_scale = 1.0F / kernel.fp_scale,
         .ray_tmin_scale = _ray_tmin_scale,
         .sun_dir = kernel.sun_dir,
-        .pad = 0.0F,
+        .blend_exponent = kernel.blend_exponent,
         .plane_origin = kernel.plane_origin,
         .plane_len1 = kernel.plane_len1,
         .plane_len2 = kernel.plane_len2,
@@ -1647,10 +1722,9 @@ void SceneImpl::dispatch_batch(const KernelDispatch& kernel,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                                  &barrier, 0, nullptr, 0, nullptr);
         });
-        const double seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                          started)
-                .count();
+        const double seconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - started)
+                                   .count();
         const double per_chunk = seconds / static_cast<double>(chunks_here);
         chunks_per_submit = std::clamp<std::uint64_t>(
             static_cast<std::uint64_t>(target_submit_seconds /

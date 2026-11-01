@@ -143,6 +143,103 @@ class ExchangeAccumImpl {
     std::uint64_t _total_rays = 0;
 };
 
+// The exchange kernel in node rows (NodeExchangeAccumulator): cells are
+// num_nodes x (num_nodes + 1 + 3), the extra real column shared by the faces
+// in no node. Dense keeps them on the GPU; Tiled streams blocks of node rows
+// into host rows as ExchangeAccumImpl does with face rows.
+class NodeExchangeAccumImpl {
+  public:
+    NodeExchangeAccumImpl(SceneImpl& scene, Band band,
+                          std::span<const NodeNum> node_numbers,
+                          const AccumConfig& config);
+    ~NodeExchangeAccumImpl();
+    NodeExchangeAccumImpl(const NodeExchangeAccumImpl&) = delete;
+    NodeExchangeAccumImpl& operator=(const NodeExchangeAccumImpl&) = delete;
+    NodeExchangeAccumImpl(NodeExchangeAccumImpl&&) = delete;
+    NodeExchangeAccumImpl& operator=(NodeExchangeAccumImpl&&) = delete;
+
+    void reset();
+    [[nodiscard]] NodeExchangeResult build_result() const;
+
+    // --- called by SceneImpl::accumulate_exchange ---------------------------
+    [[nodiscard]] Band band() const noexcept { return _band; }
+    [[nodiscard]] AccumLayout layout() const noexcept { return _config.layout; }
+    [[nodiscard]] std::uint32_t tile_rows() const noexcept {
+        return _config.tile_rows;
+    }
+    [[nodiscard]] std::uint32_t num_nodes() const noexcept {
+        return static_cast<std::uint32_t>(_nodes.size());
+    }
+    // Real columns of a row: the nodes and the column of the faces in none.
+    [[nodiscard]] std::uint32_t columns() const noexcept {
+        return num_nodes() + 1;
+    }
+    [[nodiscard]] float blend_exponent() const noexcept {
+        return static_cast<float>(_config.triangulation.exponent);
+    }
+    [[nodiscard]] bool forward_only() const noexcept {
+        return _config.triangulation.mode == TriangulationMode::None;
+    }
+    [[nodiscard]] VkBuffer buffer() const noexcept { return _cells.buffer; }
+    [[nodiscard]] VkBuffer face_columns_buffer() const noexcept {
+        return _face_columns_buf.buffer;
+    }
+    [[nodiscard]] VkBuffer face_weights_buffer() const noexcept {
+        return _face_weights_buf.buffer;
+    }
+    // A face's node row (num_nodes for a face in no node).
+    [[nodiscard]] std::uint32_t row_of(std::uint32_t face) const noexcept {
+        return _face_column[face];
+    }
+    // The resolved emitters that belong to a node, ordered by node. The
+    // first batch fixes them and uploads the face weights (a face's blend u
+    // depends on whether it emits); a later batch must name the same set.
+    [[nodiscard]] std::vector<std::uint32_t> prepare_emitters(
+        std::vector<std::uint32_t> emitters);
+    // As ExchangeAccumImpl::prepare_batch, with the budget of a node row: the
+    // rays of all its faces.
+    [[nodiscard]] float prepare_batch(std::uint64_t rays_per_face);
+    void clear_block_scratch();
+    // Tiled only: the block's node rows (absolute, ascending) into the host
+    // rows, read back whole or compacted on the device.
+    void absorb_block(std::span<const std::uint32_t> rows,
+                      std::uint32_t row_offset);
+    void absorb_compact(std::span<const std::uint32_t> rows,
+                        std::span<const std::uint32_t> first,
+                        std::span<const std::uint32_t> counts,
+                        std::span<const std::uint64_t> entries);
+    void record_batch(std::span<const std::uint32_t> emitters,
+                      std::uint64_t rays_per_face);
+
+  private:
+    // On the first batch: each face's emission share and blend u (the band's
+    // emissivity as the materials are then), uploaded for the kernel, and
+    // the per-node figures the assembly needs.
+    void fix_weights();
+
+    SceneImpl& _scene;
+    Band _band;
+    AccumConfig _config;
+    std::vector<NodeNum> _nodes;              // aggregate_nodes, the row labels
+    std::vector<std::uint32_t> _face_column;  // per face: its node's position
+    // Per node: the largest A eps of its faces (a face deposits its A eps
+    // over this, the assembly multiplies it back) and the summed A eps (what
+    // the threshold compares against).
+    std::vector<double> _node_scale;
+    std::vector<double> _node_emissive_area;
+    double _emitted_area = 0.0;         // summed A eps of the emitters
+    std::uint64_t _max_node_faces = 1;  // fixed-point budget of a row
+    GpuBuffer _cells;             // device-local u64, stride columns() + 3
+    GpuBuffer _readback;          // host-visible mirror of _cells
+    GpuBuffer _face_columns_buf;  // u32 per face
+    GpuBuffer _face_weights_buf;  // float2 per face (share, u)
+    std::vector<HostCountRow> _host_rows;  // Tiled: per node row
+    std::vector<std::uint32_t> _emitters;  // fixed by the first batch
+    double _fp_scale = 0.0;
+    std::uint64_t _rays_per_face = 0;
+    std::uint64_t _total_rays = 0;
+};
+
 class SolarAccumImpl {
   public:
     explicit SolarAccumImpl(SceneImpl& scene);

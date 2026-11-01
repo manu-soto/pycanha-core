@@ -16,6 +16,7 @@ namespace pycanha::radiative {
 class Device;
 class VfAccumulator;
 class ExchangeAccumulator;
+class NodeExchangeAccumulator;
 class SolarAccumulator;
 
 namespace detail {
@@ -66,6 +67,13 @@ class RadiativeScene {
     // Multi-bounce MCRT exchange factors for the accumulator's band (chosen
     // at accumulator construction). Same emitter semantics as accumulate_vf.
     void accumulate_exchange(ExchangeAccumulator& acc,
+                             const TraceSettings& settings,
+                             std::span<const std::uint32_t> emitters = {});
+
+    // The same trace summed to nodes as it goes (NodeExchangeAccumulator).
+    // Emitters in no node are skipped; every batch must name the same
+    // emitters (empty = all active faces, as above).
+    void accumulate_exchange(NodeExchangeAccumulator& acc,
                              const TraceSettings& settings,
                              std::span<const std::uint32_t> emitters = {});
 

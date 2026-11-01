@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -12,6 +14,8 @@
 
 #include "exchange_assemble.hpp"
 #include "pair_walk.hpp"
+#include "pycanha-core/gmm/ids.hpp"
+#include "pycanha-core/radiative/aggregate.hpp"
 #include "pycanha-core/radiative/materials.hpp"
 #include "pycanha-core/radiative/results.hpp"
 #include "pycanha-core/radiative/scene.hpp"
@@ -64,15 +68,14 @@ void merge_block_rows(std::span<const Cell> scratch, std::size_t cols,
                       std::span<const std::uint32_t> block_emitters,
                       std::uint32_t row_offset,
                       std::vector<HostCountRow>& host_rows) {
-    const unsigned threads = worker_count(
-        {}, block_emitters.size(), block_emitters.size() * cols);
+    const unsigned threads =
+        worker_count({}, block_emitters.size(), block_emitters.size() * cols);
     parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
         const std::uint32_t face = block_emitters[index];
         host_rows[face].add_dense(scratch.subspan(
             static_cast<std::size_t>(face - row_offset) * cols, cols));
     });
 }
-
 
 // An accumulator cell buffer is bound as one storage buffer, which a kernel
 // can address only up to the device's maxStorageBufferRange: beyond it the
@@ -84,8 +87,10 @@ void check_storage_range(const SceneImpl& scene, VkDeviceSize bytes) {
     if (range > 0 && bytes > range) {
         throw std::length_error(
             "pycanha::radiative: the accumulator buffer (" +
-            std::to_string(bytes) + " bytes) exceeds the device's storage "
-            "buffer range (" + std::to_string(range) +
+            std::to_string(bytes) +
+            " bytes) exceeds the device's storage "
+            "buffer range (" +
+            std::to_string(range) +
             " bytes); use AccumLayout::Tiled with fewer tile_rows");
     }
 }
@@ -235,9 +240,9 @@ void ExchangeAccumImpl::absorb_compact(
     const unsigned threads =
         worker_count({}, block_emitters.size(), entries.size());
     parallel_for_index(block_emitters.size(), threads, [&](std::size_t index) {
-        _host_rows[block_emitters[index]].add_sparse(entries.subspan(
-            static_cast<std::size_t>(first[index]) * 2,
-            static_cast<std::size_t>(counts[index]) * 2));
+        _host_rows[block_emitters[index]].add_sparse(
+            entries.subspan(static_cast<std::size_t>(first[index]) * 2,
+                            static_cast<std::size_t>(counts[index]) * 2));
     });
 }
 
@@ -292,6 +297,251 @@ ExchangeResult ExchangeAccumImpl::build_result() const {
 
 std::uint64_t ExchangeAccumImpl::conservation_error() const {
     return exchange_conservation_error(cells(), _rays_per_row, _fp_scale);
+}
+
+NodeExchangeAccumImpl::NodeExchangeAccumImpl(
+    SceneImpl& scene, Band band, std::span<const NodeNum> node_numbers,
+    const AccumConfig& config)
+    : _scene(scene), _band(band), _config(config) {
+    const std::size_t faces = _scene.num_faces();
+    if (node_numbers.size() != faces) {
+        throw std::invalid_argument(
+            "pycanha::radiative: node_numbers size must match the face count");
+    }
+    const TriangulationConfig& tri = _config.triangulation;
+    if (tri.mode == TriangulationMode::ConstrainedLeastSquares) {
+        throw std::invalid_argument(
+            "pycanha::radiative: NodeExchangeAccumulator takes "
+            "TriangulationMode None or RayDensity; ConstrainedLeastSquares "
+            "is a projection over the whole face matrix (use "
+            "ExchangeAccumulator)");
+    }
+    if (tri.keep_full_matrix) {
+        throw std::invalid_argument(
+            "pycanha::radiative: keep_full_matrix is a face matrix; "
+            "NodeExchangeAccumulator never holds one (use "
+            "ExchangeAccumulator)");
+    }
+    if (!std::isfinite(tri.exponent) || tri.exponent <= 0.0) {
+        throw std::invalid_argument(
+            "pycanha::radiative: the triangulation exponent must be finite "
+            "and greater than zero");
+    }
+    _nodes = aggregate_nodes(node_numbers);
+    const std::uint64_t nodes = _nodes.size();
+    const std::uint64_t columns =
+        nodes + 1 + static_cast<std::uint64_t>(num_virtual_columns);
+    if (columns > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("pycanha::radiative: too many nodes");
+    }
+    _face_column.assign(faces, static_cast<std::uint32_t>(nodes));
+    std::vector<std::uint64_t> node_faces(nodes, 0);
+    for (std::size_t face = 0; face < faces; ++face) {
+        if (node_numbers[face] == gmm::NO_NODE) {
+            continue;
+        }
+        const auto slot = static_cast<std::uint32_t>(std::distance(
+            _nodes.begin(),
+            std::ranges::lower_bound(_nodes, node_numbers[face])));
+        _face_column[face] = slot;
+        ++node_faces[slot];
+    }
+    for (const std::uint64_t count : node_faces) {
+        _max_node_faces = std::max(_max_node_faces, count);
+    }
+
+    std::uint64_t buffer_rows = nodes;
+    if (_config.layout == AccumLayout::Tiled) {
+        if (_config.tile_rows == 0) {
+            throw std::invalid_argument(
+                "pycanha::radiative: the Tiled layout needs tile_rows > 0");
+        }
+        _config.tile_rows = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            _config.tile_rows, std::max<std::uint64_t>(nodes, 1)));
+        buffer_rows = _config.tile_rows;
+        _host_rows.resize(nodes);
+    }
+    const VkDeviceSize cell_bytes = std::max<std::uint64_t>(buffer_rows, 1) *
+                                    columns * sizeof(std::uint64_t);
+    check_storage_range(_scene, cell_bytes);
+    _cells = _scene.create_buffer(cell_bytes, accum_usage,
+                                  BufferMemory::DeviceLocal);
+    _readback = _scene.create_buffer(cell_bytes, readback_usage,
+                                     BufferMemory::HostReadback);
+    _face_columns_buf = _scene.upload_to_new_buffer(
+        _face_column.data(), faces * sizeof(std::uint32_t),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    // Filled by the first batch (fix_weights); zero until then.
+    _face_weights_buf = _scene.create_buffer(
+        std::max<VkDeviceSize>(faces * 2 * sizeof(float), 16), accum_usage,
+        BufferMemory::DeviceLocal);
+    _scene.clear_buffer(_face_weights_buf);
+    reset();
+}
+
+NodeExchangeAccumImpl::~NodeExchangeAccumImpl() {
+    _scene.destroy_buffer(_cells);
+    _scene.destroy_buffer(_readback);
+    _scene.destroy_buffer(_face_columns_buf);
+    _scene.destroy_buffer(_face_weights_buf);
+}
+
+void NodeExchangeAccumImpl::reset() {
+    clear_block_scratch();
+    for (auto& row : _host_rows) {
+        row.clear();
+    }
+    _emitters.clear();
+    _emitted_area = 0.0;
+    _fp_scale = 0.0;
+    _rays_per_face = 0;
+    _total_rays = 0;
+}
+
+void NodeExchangeAccumImpl::clear_block_scratch() {
+    _scene.clear_buffer(_cells);
+}
+
+std::vector<std::uint32_t> NodeExchangeAccumImpl::prepare_emitters(
+    std::vector<std::uint32_t> emitters) {
+    if (emitters.empty()) {
+        return emitters;  // nothing to trace (rays_per_face == 0)
+    }
+    const std::uint32_t none = num_nodes();
+    std::erase_if(emitters, [this, none](const std::uint32_t face) {
+        return _face_column[face] == none;
+    });
+    std::ranges::sort(emitters, [this](std::uint32_t a, std::uint32_t b) {
+        return _face_column[a] != _face_column[b]
+                   ? _face_column[a] < _face_column[b]
+                   : a < b;
+    });
+    if (std::ranges::adjacent_find(emitters) != emitters.end()) {
+        throw std::invalid_argument(
+            "pycanha::radiative: an emitter is listed twice; a "
+            "NodeExchangeAccumulator needs every emitter to send the same "
+            "rays");
+    }
+    if (_emitters.empty()) {
+        _emitters = emitters;
+        fix_weights();
+    } else if (emitters != _emitters) {
+        throw std::invalid_argument(
+            "pycanha::radiative: every batch of a NodeExchangeAccumulator must "
+            "trace the emitters of its first (the face pair weights were "
+            "fixed by them); reset it or use another accumulator");
+    }
+    return emitters;
+}
+
+void NodeExchangeAccumImpl::fix_weights() {
+    const std::size_t faces = _face_column.size();
+    const std::size_t nodes = _nodes.size();
+    const std::vector<double> emissivity =
+        band_emissivity(_scene.materials(), _band);
+    const std::span<const double> areas = _scene.face_areas();
+    _node_scale.assign(nodes, 0.0);
+    _node_emissive_area.assign(nodes, 0.0);
+    for (std::size_t face = 0; face < faces; ++face) {
+        const std::uint32_t node = _face_column[face];
+        if (node < nodes) {
+            const double emissive = areas[face] * emissivity[face];
+            _node_scale[node] = std::max(_node_scale[node], emissive);
+            _node_emissive_area[node] += emissive;
+        }
+    }
+    // (share, u) per face. u is the face's area when it emits: on a trace
+    // where every emitter sends the same rays, A / N and A over the mean rays
+    // (both settings of area_weights) only differ by the common N, which the
+    // weight's ratio cancels.
+    std::vector<float> weights(2 * faces, 0.0F);
+    for (std::size_t face = 0; face < faces; ++face) {
+        const std::uint32_t node = _face_column[face];
+        if (node < nodes && _node_scale[node] > 0.0) {
+            weights[2 * face] = static_cast<float>(
+                areas[face] * emissivity[face] / _node_scale[node]);
+        }
+    }
+    _emitted_area = 0.0;
+    for (const std::uint32_t face : _emitters) {
+        weights[(2 * face) + 1] = static_cast<float>(areas[face]);
+        _emitted_area += areas[face] * emissivity[face];
+    }
+    _scene.upload_to_device_buffer(_face_weights_buf, weights.data(),
+                                   weights.size() * sizeof(float));
+}
+
+float NodeExchangeAccumImpl::prepare_batch(std::uint64_t rays_per_face) {
+    // A node row holds the deposits of all its faces' rays.
+    if (_fp_scale <= 0.0) {
+        _fp_scale = select_fp_scale(rays_per_face * _max_node_faces);
+    }
+    if ((_rays_per_face + rays_per_face) * _max_node_faces >
+        max_cumulative_rays(_fp_scale)) {
+        throw std::invalid_argument(
+            "pycanha::radiative: cumulative rays_per_face exceeds the "
+            "fixed-point accumulation range of the largest node; reset the "
+            "accumulator or use fewer rays");
+    }
+    return static_cast<float>(_fp_scale);
+}
+
+void NodeExchangeAccumImpl::absorb_block(std::span<const std::uint32_t> rows,
+                                         std::uint32_t row_offset) {
+    _scene.read_back(_cells, _readback);
+    const std::size_t cols =
+        columns() + static_cast<std::size_t>(num_virtual_columns);
+    const std::span<const std::uint64_t> scratch(
+        static_cast<const std::uint64_t*>(checked_mapped(_readback)),
+        static_cast<std::size_t>(_config.tile_rows) * cols);
+    merge_block_rows(scratch, cols, rows, row_offset, _host_rows);
+}
+
+void NodeExchangeAccumImpl::absorb_compact(
+    std::span<const std::uint32_t> rows, std::span<const std::uint32_t> first,
+    std::span<const std::uint32_t> counts,
+    std::span<const std::uint64_t> entries) {
+    const unsigned threads = worker_count({}, rows.size(), entries.size());
+    parallel_for_index(rows.size(), threads, [&](std::size_t index) {
+        _host_rows[rows[index]].add_sparse(
+            entries.subspan(static_cast<std::size_t>(first[index]) * 2,
+                            static_cast<std::size_t>(counts[index]) * 2));
+    });
+}
+
+void NodeExchangeAccumImpl::record_batch(
+    std::span<const std::uint32_t> emitters, std::uint64_t rays_per_face) {
+    _rays_per_face += rays_per_face;
+    _total_rays += rays_per_face * emitters.size();
+}
+
+NodeExchangeResult NodeExchangeAccumImpl::build_result() const {
+    const std::size_t nodes = _nodes.size();
+    const std::size_t cols =
+        columns() + static_cast<std::size_t>(num_virtual_columns);
+    ExchangeCellSource cells = std::span<const HostCountRow>(_host_rows);
+    if (_config.layout == AccumLayout::Dense && nodes > 0) {
+        _scene.read_back(_cells, _readback);
+        cells = std::span<const std::uint64_t>(
+            static_cast<const std::uint64_t*>(checked_mapped(_readback)),
+            nodes * cols);
+    } else if (_config.layout == AccumLayout::Dense) {
+        cells = std::span<const std::uint64_t>();
+    }
+    NodeExchangeResult result = assemble_node_exchange(
+        NodeExchangeInputs{.cells = cells,
+                           .num_nodes = nodes,
+                           .node_scale = _node_scale,
+                           .node_emissive_area = _node_emissive_area,
+                           .rays_per_face = _rays_per_face,
+                           .emitted_area = _emitted_area,
+                           .fp_scale = _fp_scale,
+                           .band = _band},
+        _config);
+    result.nodes = _nodes;
+    result.stats.total_rays = _total_rays;
+    result.stats.rays_per_face = _rays_per_face;
+    return result;
 }
 
 SolarAccumImpl::SolarAccumImpl(SceneImpl& scene) : _scene(scene) {

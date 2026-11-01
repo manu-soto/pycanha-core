@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -57,6 +58,34 @@ void RadiativeScene::accumulate_exchange(
     std::span<const std::uint32_t> emitters) {
     _impl->accumulate_exchange(acc.impl(), settings, emitters);
 }
+
+#ifdef __APPLE__
+namespace detail {
+// The Metal backend has no node accumulator yet; the class only completes
+// the public type.
+class NodeExchangeAccumImpl {};
+}  // namespace detail
+
+namespace {
+[[noreturn]] void throw_no_metal_nodes() {
+    throw std::runtime_error(
+        "pycanha::radiative: NodeExchangeAccumulator is not available on the "
+        "Metal backend yet; use ExchangeAccumulator and aggregate_matrix");
+}
+}  // namespace
+
+void RadiativeScene::accumulate_exchange(
+    NodeExchangeAccumulator& /*acc*/, const TraceSettings& /*settings*/,
+    std::span<const std::uint32_t> /*emitters*/) {
+    throw_no_metal_nodes();
+}
+#else
+void RadiativeScene::accumulate_exchange(
+    NodeExchangeAccumulator& acc, const TraceSettings& settings,
+    std::span<const std::uint32_t> emitters) {
+    _impl->accumulate_exchange(acc.impl(), settings, emitters);
+}
+#endif
 
 void RadiativeScene::accumulate_solar(const SolarState& sun,
                                       SolarAccumulator& acc,
@@ -120,6 +149,42 @@ detail::ExchangeAccumImpl& ExchangeAccumulator::impl() noexcept {
     return *_impl;
 }
 
+#ifdef __APPLE__
+NodeExchangeAccumulator::NodeExchangeAccumulator(
+    const RadiativeScene& /*scene*/, Band /*band*/,
+    std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/) {
+    throw_no_metal_nodes();
+}
+
+void NodeExchangeAccumulator::reset() { throw_no_metal_nodes(); }
+
+NodeExchangeResult NodeExchangeAccumulator::result() const {
+    throw_no_metal_nodes();
+}
+#else
+NodeExchangeAccumulator::NodeExchangeAccumulator(
+    const RadiativeScene& scene, Band band,
+    std::span<const NodeNum> node_numbers, AccumConfig config)
+    : _impl(std::make_unique<detail::NodeExchangeAccumImpl>(
+          scene.impl(), band, node_numbers, config)) {}
+
+void NodeExchangeAccumulator::reset() { _impl->reset(); }
+
+NodeExchangeResult NodeExchangeAccumulator::result() const {
+    return _impl->build_result();
+}
+#endif
+
+NodeExchangeAccumulator::~NodeExchangeAccumulator() = default;
+NodeExchangeAccumulator::NodeExchangeAccumulator(
+    NodeExchangeAccumulator&&) noexcept = default;
+NodeExchangeAccumulator& NodeExchangeAccumulator::operator=(
+    NodeExchangeAccumulator&&) noexcept = default;
+
+detail::NodeExchangeAccumImpl& NodeExchangeAccumulator::impl() noexcept {
+    return *_impl;
+}
+
 SolarAccumulator::SolarAccumulator(const RadiativeScene& scene)
     : _impl(std::make_unique<detail::SolarAccumImpl>(scene.impl())) {}
 
@@ -151,6 +216,27 @@ MemoryEstimate estimate_memory(const RadiativeScene& scene,
             ? std::min<std::uint64_t>(
                   std::max<std::uint64_t>(config.tile_rows, 1), faces)
             : faces;
+    out.host_bytes_block = out.gpu_bytes_per_tile_row * block_rows;
+    return out;
+}
+
+MemoryEstimate estimate_node_memory(const RadiativeScene& scene,
+                                    std::uint64_t num_nodes,
+                                    const AccumConfig& config) {
+    // The node columns, the one shared by faces in no node, the buckets.
+    const std::uint64_t cols =
+        num_nodes + 1 + static_cast<std::uint64_t>(num_virtual_columns);
+    constexpr std::uint64_t cell_bytes = sizeof(std::uint64_t);
+
+    MemoryEstimate out;
+    out.gpu_bytes_dense = num_nodes * cols * cell_bytes;
+    out.gpu_bytes_per_tile_row = cols * cell_bytes;
+    out.gpu_bytes_scene = scene.impl().scene_bytes();
+    const std::uint64_t block_rows =
+        config.layout == AccumLayout::Tiled
+            ? std::min<std::uint64_t>(
+                  std::max<std::uint64_t>(config.tile_rows, 1), num_nodes)
+            : num_nodes;
     out.host_bytes_block = out.gpu_bytes_per_tile_row * block_rows;
     return out;
 }

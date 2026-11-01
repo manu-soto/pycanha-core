@@ -23,6 +23,7 @@ namespace pycanha::radiative::detail {
 
 class VfAccumImpl;
 class ExchangeAccumImpl;
+class NodeExchangeAccumImpl;
 class SolarAccumImpl;
 
 // Minimal RAII-by-owner buffer: created/destroyed by SceneImpl helpers.
@@ -89,7 +90,7 @@ struct PushConstants {
     float inv_fp_scale;
     float ray_tmin_scale;
     std::array<float, 3> sun_dir;
-    float pad;
+    float blend_exponent;  // exchange node rows only
     std::array<float, 3> plane_origin;
     float plane_len1;
     float plane_len2;
@@ -115,6 +116,10 @@ class SceneImpl {
     void accumulate_vf(VfAccumImpl& acc, const TraceSettings& settings,
                        std::span<const std::uint32_t> emitters);
     void accumulate_exchange(ExchangeAccumImpl& acc,
+                             const TraceSettings& settings,
+                             std::span<const std::uint32_t> emitters);
+    // The exchange kernel in node rows (NodeExchangeAccumulator).
+    void accumulate_exchange(NodeExchangeAccumImpl& acc,
                              const TraceSettings& settings,
                              std::span<const std::uint32_t> emitters);
     void accumulate_solar(const SolarState& sun, SolarAccumImpl& acc,
@@ -229,6 +234,10 @@ class SceneImpl {
         float plane_len1 = 0.0F;
         float plane_len2 = 0.0F;
         float plane_area = 0.0F;
+        // Exchange node rows only: the real columns of a row (nodes + 1;
+        // 0 = the scene's faces) and the blend exponent.
+        std::uint32_t columns = 0;
+        float blend_exponent = 0.0F;
     };
     // Traces settings.rays_per_face rays for `emitters` (all within
     // [row_offset, row_offset + accumulator rows)), in batches of at most
@@ -249,9 +258,15 @@ class SceneImpl {
     // block cannot go this way (no compaction kernel, more rows than one
     // launch takes, or PYCANHA_TILED_DENSE_READBACK=1): the caller then reads
     // it back whole. The block's cells are left as they were either way.
-    [[nodiscard]] bool compact_block(ExchangeAccumImpl& acc,
-                                     std::span<const std::uint32_t> block,
-                                     std::uint32_t row_offset);
+    // `rows` are the block's accumulator rows (absolute: the emitter faces,
+    // or in node rows the nodes), `columns` a row's real columns; the
+    // accumulator takes them through absorb_compact. Defined in the .cpp,
+    // which holds every use.
+    template <class Accumulator>
+    [[nodiscard]] bool compact_block(Accumulator& acc,
+                                     std::span<const std::uint32_t> rows,
+                                     std::uint32_t row_offset,
+                                     std::uint32_t columns);
     // Shared argument validation of the accumulate_* entry points; returns
     // the effective emitter list (the default list when `emitters` is
     // empty). An empty return means there is nothing to trace.

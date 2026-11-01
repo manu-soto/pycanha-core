@@ -14,6 +14,7 @@
 #include "exchange_assemble.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -488,6 +489,166 @@ std::uint64_t exchange_conservation_error(
         max_error = std::max(max_error, row_error(balance, row));
     }
     return max_error;
+}
+
+NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
+                                          const AccumConfig& config) {
+    const std::size_t nodes = in.num_nodes;
+    // A kernel row: the node columns, the faces in no node, the buckets.
+    constexpr auto buckets_after =
+        static_cast<std::size_t>(num_virtual_columns);
+    constexpr auto lost_bucket = static_cast<std::size_t>(lost_column_offset);
+    constexpr auto unassigned_bucket =
+        static_cast<std::size_t>(unassigned_column_offset);
+    constexpr auto node_buckets =
+        static_cast<std::size_t>(num_node_virtual_columns);
+    const std::size_t unassigned = nodes;
+    const std::size_t stride = nodes + 1 + buckets_after;
+    const std::size_t lost_cell = unassigned + 1 + lost_bucket;
+    NodeExchangeResult result;
+    result.band = in.band;
+    const auto result_cols = static_cast<Eigen::Index>(nodes + node_buckets);
+    result.factors.resize(static_cast<Eigen::Index>(nodes), result_cols);
+    if (nodes == 0 || in.fp_scale <= 0.0 || in.rays_per_face == 0) {
+        return result;
+    }
+
+    const auto* dense = std::get_if<std::span<const std::uint64_t>>(&in.cells);
+    const auto* host = std::get_if<std::span<const HostCountRow>>(&in.cells);
+    if (dense != nullptr && dense->size() != nodes * stride) {
+        throw_dense_size_mismatch();
+    }
+    if (host != nullptr && host->size() != nodes) {
+        throw std::invalid_argument(
+            "pycanha::radiative: the tiled cell rows do not match the node "
+            "count");
+    }
+    // Visits row `row`'s nonzero cells in ascending column, either layout.
+    const auto visit = [&](std::size_t row, const auto& fn) {
+        if (dense != nullptr) {
+            const std::span<const std::uint64_t> line =
+                dense->subspan(row * stride, stride);
+            for (std::size_t column = 0; column < stride; ++column) {
+                if (line[column] != 0) {
+                    fn(column, line[column]);
+                }
+            }
+            return;
+        }
+        for (const auto& [column, cell] : (*host)[row]) {
+            if (cell != 0) {
+                fn(static_cast<std::size_t>(column), cell);
+            }
+        }
+    };
+
+    // What one fixed-point unit of a row is worth in H (m^2).
+    std::vector<double> unit(nodes);
+    for (std::size_t row = 0; row < nodes; ++row) {
+        unit[row] = in.node_scale[row] /
+                    (static_cast<double>(in.rays_per_face) * in.fp_scale);
+    }
+    const unsigned threads = worker_count({}, nodes, nodes * stride);
+
+    // The deposits of row m on a lower node n < m belong to the upper entry
+    // (n, m): gathered per target node as a counting sort over the rows in
+    // ascending order, so each target's list comes out sorted by m.
+    std::vector<std::size_t> start(nodes + 1, 0);
+    for (std::size_t row = 0; row < nodes; ++row) {
+        visit(row, [&](std::size_t column, std::uint64_t /*cell*/) {
+            if (column < row) {
+                ++start[column + 1];
+            }
+        });
+    }
+    std::partial_sum(start.begin(), start.end(), start.begin());
+    std::vector<std::uint32_t> lower_row(start[nodes]);
+    std::vector<double> lower_value(start[nodes]);
+    {
+        std::vector<std::size_t> next(start.begin(), start.end() - 1);
+        for (std::size_t row = 0; row < nodes; ++row) {
+            visit(row, [&](std::size_t column, std::uint64_t cell) {
+                if (column < row) {
+                    const std::size_t at = next[column]++;
+                    lower_row[at] = static_cast<std::uint32_t>(row);
+                    lower_value[at] = static_cast<double>(cell) * unit[row];
+                }
+            });
+        }
+    }
+
+    const double threshold = config.sparse_threshold;
+    const auto keep = [&](double value, std::size_t row, std::size_t column) {
+        if (value == 0.0) {
+            return false;
+        }
+        const double smaller =
+            std::min(in.node_emissive_area[row], in.node_emissive_area[column]);
+        return !(smaller > 0.0) || (std::abs(value) / smaller) > threshold;
+    };
+    std::vector<RowEntries> rows(nodes);
+    std::vector<double> diagonal(nodes, 0.0);
+    std::vector<double> lost(nodes, 0.0);
+    parallel_for_index(nodes, threads, [&](std::size_t row) {
+        RowEntries& out = rows[row];
+        std::size_t at = start[row];
+        const std::size_t end = start[row + 1];
+        // Each bucket keeps its value until the real columns are written:
+        // result columns run space, inactive, lost, unassigned.
+        std::array<double, node_buckets> buckets{};
+        visit(row, [&](std::size_t column, std::uint64_t cell) {
+            if (column < row) {
+                return;
+            }
+            if (column == row) {
+                diagonal[row] = static_cast<double>(cell) * unit[row];
+                return;
+            }
+            if (column < nodes) {
+                // Upper entries of other rows that precede this column.
+                for (; at < end && lower_row[at] < column; ++at) {
+                    if (keep(lower_value[at], row, lower_row[at])) {
+                        out.push(lower_row[at], lower_value[at]);
+                    }
+                }
+                double value = static_cast<double>(cell) * unit[row];
+                if (at < end && lower_row[at] == column) {
+                    value += lower_value[at++];
+                }
+                if (keep(value, row, column)) {
+                    out.push(column, value);
+                }
+                return;
+            }
+            const double energy =
+                column == lost_cell
+                    ? static_cast<double>(static_cast<std::int64_t>(cell))
+                    : static_cast<double>(cell);
+            const std::size_t bucket = column == unassigned
+                                           ? unassigned_bucket
+                                           : column - unassigned - 1;
+            buckets[bucket] = energy * unit[row];
+        });
+        for (; at < end; ++at) {
+            if (keep(lower_value[at], row, lower_row[at])) {
+                out.push(lower_row[at], lower_value[at]);
+            }
+        }
+        lost[row] = buckets[lost_bucket];
+        for (std::size_t bucket = 0; bucket < buckets.size(); ++bucket) {
+            if (buckets[bucket] != 0.0) {
+                out.push(nodes + bucket, buckets[bucket]);
+            }
+        }
+    });
+    result.factors = pack_rows(rows, result_cols, threads);
+    // Summed in row order, so the totals do not depend on the threads.
+    result.intra_node_total =
+        std::accumulate(diagonal.begin(), diagonal.end(), 0.0);
+    const double lost_total = std::accumulate(lost.begin(), lost.end(), 0.0);
+    result.stats.lost_energy_fraction =
+        in.emitted_area > 0.0 ? lost_total / in.emitted_area : 0.0;
+    return result;
 }
 
 }  // namespace pycanha::radiative::detail

@@ -117,10 +117,12 @@ endif()
 
 # Likewise the Vulkan backend has a per-launch emitter limit (the dispatch's
 # Y workgroup count) that Metal grids do not, and its test reaches the limit
-# through a hook only the Vulkan backend defines.
+# through a hook only the Vulkan backend defines; and only it has the node
+# rows of the exchange kernel (NodeExchangeAccumulator).
 if(PYCANHA_OPTION_RAYTRACING AND NOT APPLE)
   list(APPEND UNIT_TEST_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_vk_dispatch_batching.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_vk_dispatch_batching.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/radiative/test_vk_node_exchange.cpp")
 endif()
 
 set(TEST_SOURCES
