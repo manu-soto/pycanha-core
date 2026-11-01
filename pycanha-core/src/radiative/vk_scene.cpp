@@ -51,6 +51,23 @@ constexpr double target_submit_seconds = 0.25;
 constexpr std::uint64_t max_chunks_per_submit = 256;
 
 constexpr std::uint32_t workgroup_size_x = 64;
+
+// Whether an environment variable is set to "1" (std::getenv is deprecated
+// under MSVC, whose builds treat that warning as an error).
+[[nodiscard]] bool env_is_one(const char* name) {
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    std::size_t length = 0;
+    const bool one = _dupenv_s(&value, &length, name) == 0 && value != nullptr &&
+                     std::string(value) == "1";
+    std::free(value);  // NOLINT(cppcoreguidelines-no-malloc): _dupenv_s's buffer
+    return one;
+#else
+    const char* value = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
+    return value != nullptr && std::string(value) == "1";
+#endif
+}
+
 // Bindings 0-9 are the shared scene tables; 10-12 are the per-kernel
 // accumulator buffers (kernels that use fewer leave the rest on a dummy).
 constexpr std::uint32_t num_bindings = 12;
@@ -985,8 +1002,7 @@ void SceneImpl::create_pipelines() {
                                                "compact pipeline creation");
     // An escape hatch for A/B timing and diagnosis: the Tiled exchange blocks
     // read back whole, as before the compaction kernel.
-    const char* dense = std::getenv("PYCANHA_TILED_DENSE_READBACK");
-    _compact_disabled = dense != nullptr && std::string(dense) == "1";
+    _compact_disabled = env_is_one("PYCANHA_TILED_DENSE_READBACK");
 
     const std::array<VkDescriptorPoolSize, 2> pool_sizes{
         VkDescriptorPoolSize{
