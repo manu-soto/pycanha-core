@@ -54,7 +54,7 @@ class Recipe_pycanha_core(ConanFile):
         "spirv-tools": "1.4.357.0",  # tool_requires: spirv-val build check
         # slangc prebuilt release fetched by CMake (no Conan recipe exists;
         # the per-version SHA256 pins live in cmake/Slang.cmake):
-        "slang": "2026.20",
+        "slang": "2026.12.2",
         "doxygen": "1.15.0",  # Tested version, but this is just a hint for CMake
         "doxygen_awesome_css": "v2.5.0",
     }
