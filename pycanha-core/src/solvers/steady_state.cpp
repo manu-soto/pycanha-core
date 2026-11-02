@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -468,14 +469,40 @@ Eigen::MatrixXd SteadyState::jacobian() {
         rhs.col(column) = change;
     }
 
-    Eigen::MatrixXd derivatives = Eigen::MatrixXd::Zero(nd, count);
-    if (!_network->solve(rhs, derivatives)) {
-        throw std::runtime_error(std::string(name()) +
-                                 ": the derivative solve failed (" +
-                                 _network->error_message() + ")");
-    }
+    Eigen::MatrixXd derivatives = solve_tangent(rhs, "derivative");
     _derivative_parameter_names = std::move(changes.names);
     return derivatives;
+}
+
+Eigen::MatrixXd SteadyState::solve_tangent(const Eigen::MatrixXd& rhs,
+                                           std::string_view what) {
+    // A zero column is solved by a zero column. It is left out of the solve:
+    // with reuse_factors, PARDISO's iteration on the factors fails on a zero
+    // right-hand side (error -4), as in solve().
+    std::vector<Index> nonzero;
+    for (Index column = 0; column < rhs.cols(); ++column) {
+        if (!rhs.col(column).isZero(0.0)) {
+            nonzero.push_back(column);
+        }
+    }
+    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(nd, rhs.cols());
+    if (nonzero.empty()) {
+        return result;
+    }
+    Eigen::MatrixXd packed(nd, to_idx(nonzero.size()));
+    for (std::size_t k = 0; k < nonzero.size(); ++k) {
+        packed.col(to_idx(k)) = rhs.col(nonzero[k]);
+    }
+    Eigen::MatrixXd solution = Eigen::MatrixXd::Zero(nd, packed.cols());
+    if (!_network->solve(packed, solution)) {
+        throw std::runtime_error(std::string(name()) + ": the " +
+                                 std::string(what) + " solve failed (" +
+                                 _network->error_message() + ")");
+    }
+    for (std::size_t k = 0; k < nonzero.size(); ++k) {
+        result.col(nonzero[k]) = solution.col(to_idx(k));
+    }
+    return result;
 }
 
 Eigen::MatrixXd SteadyState::linear_response(const Eigen::MatrixXd& heat) {
@@ -487,14 +514,7 @@ Eigen::MatrixXd SteadyState::linear_response(const Eigen::MatrixXd& heat) {
                                     "diffusive node (" + std::to_string(nd) +
                                     "), not " + std::to_string(heat.rows()));
     }
-    Eigen::MatrixXd rhs = heat;
-    Eigen::MatrixXd response = Eigen::MatrixXd::Zero(nd, heat.cols());
-    if (!_network->solve(rhs, response)) {
-        throw std::runtime_error(std::string(name()) +
-                                 ": the response solve failed (" +
-                                 _network->error_message() + ")");
-    }
-    return response;
+    return solve_tangent(heat, "response");
 }
 
 void SteadyState::deinitialize() { release(); }

@@ -127,6 +127,11 @@ class SteadyState : public Solver {
     // Linearizes the network at the converged temperatures and factorizes
     // it, once per solve(). Throws as jacobian().
     void factorize_tangent();
+    // Solves the tangent's factors for every column of `rhs`; a zero column
+    // gives a zero column without a solve. `what` names the solve in the
+    // error message.
+    [[nodiscard]] Eigen::MatrixXd solve_tangent(const Eigen::MatrixXd& rhs,
+                                                std::string_view what);
     void release() noexcept;
 };
 
