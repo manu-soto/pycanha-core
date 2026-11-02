@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "pycanha-core/globals.hpp"
-#include "pycanha-core/solvers/sslu.hpp"
+#include "pycanha-core/solvers/model_changed_error.hpp"
+#include "pycanha-core/solvers/settings.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 #include "pycanha-core/tmm/bulk.hpp"
 #include "pycanha-core/tmm/conductivecouplings.hpp"
 #include "pycanha-core/tmm/couplingmatrices.hpp"
@@ -375,18 +377,20 @@ TEST_CASE("a conduction-only model built through Nodes solves",
     REQUIRE(tmm->nodes().set_qi(1, 10.0));
 
     // The radiative matrices were never touched: the solver sizes them.
-    SSLU solver(tmm);
-    solver.max_iters = 10;
+    solvers::steady::SteadyState solver(tmm);
+    solvers::Settings settings;
+    settings.max_iterations = 10;
+    solver.set_settings(settings);
     solver.initialize();
     solver.solve();
-    REQUIRE(solver.solver_converged);
+    REQUIRE(solver.converged());
     // 10 W through three unit conductors in series.
     REQUIRE(std::abs(tmm->nodes().get_T(1) - 230.0) < 1e-6);
 
     // Adding a node after initialize() invalidates the solver.
     tmm->add_node(Index{5});
     tmm->nodes().set_T(1, 0.0);
-    solver.solve();
+    REQUIRE_THROWS_AS(solver.solve(), solvers::ModelChangedError);
     REQUIRE(tmm->nodes().get_T(1) == 0.0);
 }
 

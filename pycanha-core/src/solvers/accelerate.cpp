@@ -1,4 +1,6 @@
-#include "pycanha-core/solvers/accelerate.hpp"
+#include "accelerate.hpp"
+
+#include "pycanha-core/solvers/settings.hpp"
 
 #if PYCANHA_USE_ACCELERATE
 
@@ -7,6 +9,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <format>
 #include <memory>
@@ -17,13 +20,13 @@
 #include <utility>
 #include <vector>
 
+#include "factorizer.hpp"
 #include "pycanha-core/globals.hpp"
-#include "pycanha-core/solvers/linear_solver.hpp"
 #include "pycanha-core/utils/logger.hpp"
 
 #endif
 
-namespace pycanha {
+namespace pycanha::solvers {
 
 bool accelerate_available() noexcept {
 #if PYCANHA_USE_ACCELERATE
@@ -35,14 +38,18 @@ bool accelerate_available() noexcept {
     return false;
 }
 
+}  // namespace pycanha::solvers
+
 #if PYCANHA_USE_ACCELERATE
+
+namespace pycanha::solvers::detail {
 
 namespace {
 
-using SparseMatrix = SparseLinearSolver::SparseMatrix;
+using SparseMatrix = Factorizer::SparseMatrix;
 
 // Without a reportError callback Accelerate traps on a parameter error. With
-// it, the error is logged and returned in the status of the factorisation.
+// it, the error is logged and returned in the status of the factorization.
 void report_error(const char* message) {
     SPDLOG_LOGGER_ERROR(get_logger(), "Accelerate: {}", message);
 }
@@ -65,21 +72,21 @@ void report_error(const char* message) {
     return "unknown status";
 }
 
-class AccelerateSolver final : public SparseLinearSolver {
+class AccelerateFactorizer final : public Factorizer {
   public:
-    AccelerateSolver(SparseFactorization_t factorization, SparseOrder_t order,
-                     bool symmetric, std::string name)
+    AccelerateFactorizer(SparseFactorization_t factorization,
+                         SparseOrder_t order, bool symmetric, std::string name)
         : _factorization(factorization),
           _order(order),
           _symmetric(symmetric),
           _name(std::move(name)) {}
 
-    ~AccelerateSolver() override { release(); }
+    ~AccelerateFactorizer() override { release(); }
 
-    AccelerateSolver(const AccelerateSolver&) = delete;
-    AccelerateSolver& operator=(const AccelerateSolver&) = delete;
-    AccelerateSolver(AccelerateSolver&&) = delete;
-    AccelerateSolver& operator=(AccelerateSolver&&) = delete;
+    AccelerateFactorizer(const AccelerateFactorizer&) = delete;
+    AccelerateFactorizer& operator=(const AccelerateFactorizer&) = delete;
+    AccelerateFactorizer(AccelerateFactorizer&&) = delete;
+    AccelerateFactorizer& operator=(AccelerateFactorizer&&) = delete;
 
     void analyze_pattern(const SparseMatrix& matrix) override {
         if (!matrix.isCompressed() || matrix.rows() != matrix.cols()) {
@@ -184,6 +191,27 @@ class AccelerateSolver final : public SparseLinearSolver {
                            to_string(_status));
     }
 
+    // The factor storage and the factorization workspace the symbolic
+    // analysis asks for.
+    [[nodiscard]] std::int64_t factor_bytes() const noexcept override {
+        if (!_analyzed) {
+            return 0;
+        }
+        return static_cast<std::int64_t>(_symbolic.factorSize_Double +
+                                         _symbolic.workspaceSize_Double);
+    }
+    // Cholesky does not pivot, so the analysis fixes its factor. The LU
+    // pivots during the factorization, which may change it.
+    [[nodiscard]] bool factor_bytes_exact() const noexcept override {
+        return _symmetric;
+    }
+    // The copied index arrays.
+    [[nodiscard]] std::int64_t matrix_copy_bytes() const noexcept override {
+        return static_cast<std::int64_t>(
+            (_column_starts.size() * sizeof(_column_starts.front())) +
+            (_row_indices.size() * sizeof(_row_indices.front())));
+    }
+
   private:
     SparseFactorization_t _factorization;
     SparseOrder_t _order;
@@ -255,35 +283,26 @@ class AccelerateSolver final : public SparseLinearSolver {
 
 }  // namespace
 
-std::unique_ptr<SparseLinearSolver> make_accelerate_solver(
-    DirectSolverType type, bool symmetric_positive_definite) {
-    if (!accelerate_available()) {
-        throw std::invalid_argument(
-            "Accelerate sparse LU needs macOS 15.5 or newer");
-    }
-    if (type != DirectSolverType::METIS && type != DirectSolverType::AMD) {
-        throw std::invalid_argument(
-            std::format("Solver type {} is not an Accelerate ordering: use "
-                        "METIS or AMD.",
-                        to_string(type)));
-    }
-    const SparseOrder_t order =
-        type == DirectSolverType::METIS ? SparseOrderMetis : SparseOrderAMD;
-    std::string name =
-        std::format("{} ({})", symmetric_positive_definite ? "Cholesky" : "LU",
-                    to_string(type));
-    if (symmetric_positive_definite) {
-        return std::make_unique<AccelerateSolver>(SparseFactorizationCholesky,
-                                                  order, true, std::move(name));
+std::unique_ptr<Factorizer> make_accelerate_factorizer(
+    AccelerateOrdering ordering, bool symmetric) {
+    const SparseOrder_t order = ordering == AccelerateOrdering::METIS
+                                    ? SparseOrderMetis
+                                    : SparseOrderAMD;
+    std::string name = std::format("{} ({})", symmetric ? "Cholesky" : "LU",
+                                   to_string(ordering));
+    if (symmetric) {
+        return std::make_unique<AccelerateFactorizer>(
+            SparseFactorizationCholesky, order, /*symmetric=*/true,
+            std::move(name));
     }
     if (__builtin_available(macOS 15.5, *)) {
-        return std::make_unique<AccelerateSolver>(SparseFactorizationLU, order,
-                                                  false, std::move(name));
+        return std::make_unique<AccelerateFactorizer>(
+            SparseFactorizationLU, order, /*symmetric=*/false, std::move(name));
     }
     throw std::invalid_argument(
         "Accelerate sparse LU needs macOS 15.5 or newer");
 }
 
-#endif  // PYCANHA_USE_ACCELERATE
+}  // namespace pycanha::solvers::detail
 
-}  // namespace pycanha
+#endif  // PYCANHA_USE_ACCELERATE

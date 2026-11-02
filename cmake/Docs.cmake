@@ -3,10 +3,10 @@
 find_package(Doxygen)
 
 # Version hints are exported by Conan to keep tool versions traceable.
-set(PYCANHA_OPTION_DOXYGEN_VERSION "1.9.4" CACHE STRING "Pinned Doxygen version hint")
+set(PYCANHA_OPTION_DOXYGEN_VERSION "1.15.0" CACHE STRING "Pinned Doxygen version hint")
 set(
     PYCANHA_OPTION_DOXYGEN_AWESOME_CSS_VERSION
-    "v2.2.0"
+    "v2.5.0"
     CACHE STRING
     "Pinned doxygen-awesome-css version"
 )

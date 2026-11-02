@@ -195,6 +195,11 @@ const ThermalData& ThermalMathematicalModel::thermal_data() const noexcept {
     return *_thermal_data_shptr;
 }
 
+StructureVersions ThermalMathematicalModel::structure_versions()
+    const noexcept {
+    return _network->structure_versions();
+}
+
 ConductiveCouplings& ThermalMathematicalModel::conductive_couplings() noexcept {
     return _network->conductive_couplings();
 }
@@ -426,20 +431,21 @@ void ThermalMathematicalModel::callback_transient_after_timestep() {
 }
 
 void ThermalMathematicalModel::associate_solvers(
-    SolverRegistry& solvers) noexcept {
+    solvers::SolverRegistry& solvers) noexcept {
     _solvers = std::addressof(solvers);
 }
 
 void ThermalMathematicalModel::set_current_callback_solver(
-    Solver* solver) noexcept {
+    solvers::Solver* solver) noexcept {
     _current_callback_solver = solver;
 }
 
-Solver* ThermalMathematicalModel::current_callback_solver() const noexcept {
+solvers::Solver* ThermalMathematicalModel::current_callback_solver()
+    const noexcept {
     return _current_callback_solver;
 }
 
-SolverRegistry& ThermalMathematicalModel::solvers() {
+solvers::SolverRegistry& ThermalMathematicalModel::solvers() {
     if (_solvers == nullptr) {
         throw std::runtime_error(
             "ThermalMathematicalModel is not associated with a SolverRegistry");
@@ -448,7 +454,7 @@ SolverRegistry& ThermalMathematicalModel::solvers() {
     return *_solvers;
 }
 
-const SolverRegistry& ThermalMathematicalModel::solvers() const {
+const solvers::SolverRegistry& ThermalMathematicalModel::solvers() const {
     if (_solvers == nullptr) {
         throw std::runtime_error(
             "ThermalMathematicalModel is not associated with a SolverRegistry");

@@ -18,7 +18,7 @@ class Recipe_pycanha_core(ConanFile):
 
     # This is the version used everywhere. Right now is set manually,
     # but it could be set automatically from the git tag for example.
-    version = "0.23"
+    version = "0.24"
 
     # I've followed the instructions from https://docs.conan.io/2/tutorial/creating_packages/other_types_of_packages/header_only_packages.html
     # but without adding the "header-only" keyword to the recipe, it doesn't work. The use of the "header-only" is from here:
@@ -41,22 +41,22 @@ class Recipe_pycanha_core(ConanFile):
     # Includes both Conan dependencies and tooling hints used by CMake/docs.
     DEPENDENCY_VERSIONS = {
         "eigen": "5.0.1",
-        "manifold": "3.4.1",
-        "mkl": "2025.3.1",
-        "catch2": "3.13.0",
+        "manifold": "3.5.1",
+        "mkl": "2026.2.0",
+        "catch2": "3.16.0",
         "hdf5": "1.14.6",
-        "symengine": "0.14.0",
+        "symengine": "0.15.0",
         "spdlog": "1.17.0",
         # Raytracing (PYCANHA_OPTION_RAYTRACING). One coherent SDK version:
-        "vulkan-headers": "1.4.350.0",
-        "volk": "1.4.350.0",
+        "vulkan-headers": "1.4.357.0",
+        "volk": "1.4.357.0",
         "vulkan-memory-allocator": "3.3.0",
-        "spirv-tools": "1.4.350.0",  # tool_requires: spirv-val build check
+        "spirv-tools": "1.4.357.0",  # tool_requires: spirv-val build check
         # slangc prebuilt release fetched by CMake (no Conan recipe exists;
         # the per-version SHA256 pins live in cmake/Slang.cmake):
-        "slang": "2026.12.2",
-        "doxygen": "1.9.4",  # Tested version, but this is just a hint for CMake
-        "doxygen_awesome_css": "v2.2.0",
+        "slang": "2026.20",
+        "doxygen": "1.15.0",  # Tested version, but this is just a hint for CMake
+        "doxygen_awesome_css": "v2.5.0",
     }
     options = {
         "fPIC": [True, False],
@@ -99,6 +99,10 @@ class Recipe_pycanha_core(ConanFile):
         "PYCANHA_OPTION_SANITIZE_UNDEF": False,
         "PYCANHA_OPTION_RAYTRACING": True,
         "spdlog/*:use_std_fmt": True,
+        # Boost.Multiprecision (BSL-1.0) instead of SymEngine's default GMP
+        # (LGPL), which would be statically linked into every binary.
+        "symengine/*:integer_class": "boostmp",
+        "boost/*:header_only": True,
     }
 
     # Sources are located in the same place as this recipe, copy them to the recipe
@@ -114,15 +118,20 @@ class Recipe_pycanha_core(ConanFile):
         # Library dependencies
         self.requires(f"eigen/{versions['eigen']}", transitive_headers=True)
         self.requires(f"hdf5/{versions['hdf5']}")
-        self.requires(f"symengine/{versions['symengine']}")
+        # Public headers include SymEngine's, which include Boost's.
+        self.requires(
+            f"symengine/{versions['symengine']}", transitive_headers=True
+        )
         self.requires(
             f"spdlog/{versions['spdlog']}",
             transitive_headers=True,
             transitive_libs=True,
         )
         # transitive_headers=True is used when the dependencies of the library are headers needed by the consumer.
-        # Manifold is intentionally not a Conan requirement yet.
-        # We fetch the pinned version from CMake until a suitable Conan recipe is available.
+        # The installed gmm/cutting headers include Manifold's.
+        self.requires(
+            f"manifold/{versions['manifold']}", transitive_headers=True
+        )
 
         # Raytracing dependencies: vulkan-headers + volk only — no link-time
         # Vulkan loader (volk dlopens the driver at Device::create, so the
@@ -220,9 +229,6 @@ class Recipe_pycanha_core(ConanFile):
         tc.cache_variables["CONAN_PROJECT_VERSION"] = self.version
 
         # Export centrally managed version hints for CMake and docs tooling.
-        tc.cache_variables["PYCANHA_OPTION_MANIFOLD_VERSION"] = (
-            self.DEPENDENCY_VERSIONS["manifold"]
-        )
         tc.cache_variables["PYCANHA_OPTION_DOXYGEN_VERSION"] = self.DEPENDENCY_VERSIONS[
             "doxygen"
         ]
@@ -297,17 +303,20 @@ class Recipe_pycanha_core(ConanFile):
             dst=os.path.join(self.package_folder, "include"),
         )
 
-        # Copy static library files (.lib for MSVC, .a for GCC/Clang)
+        # Copy the static library (.lib for MSVC, .a for GCC/Clang). Name it:
+        # the build folder also holds the import libraries of the test
+        # executables and of the fetched slangc toolchain. The pattern matches
+        # the path relative to the build folder, hence the leading "*".
         copy(
             self,
-            pattern="*.lib",
+            pattern="*pycanha-core.lib",
             src=self.build_folder,
             dst=os.path.join(self.package_folder, "lib"),
             keep_path=False,
         )
         copy(
             self,
-            pattern="*.a",
+            pattern="*libpycanha-core.a",
             src=self.build_folder,
             dst=os.path.join(self.package_folder, "lib"),
             keep_path=False,
@@ -333,17 +342,11 @@ class Recipe_pycanha_core(ConanFile):
         # -- Now this is not necessary. Because I'm using CMake install() to copy pycanha-core/include to the package/include folder
         #    So now the headers are in the include folder, and conan will find them automatically.
 
-        # Manifold is built from source (FetchContent) and installed into the
-        # package lib dir, but it is a separate static library that pycanha-core
-        # links against — its symbols are NOT merged into pycanha-core.lib. It
-        # must therefore be advertised to consumers (e.g. the Python bindings),
-        # otherwise linking a consumer fails with unresolved manifold::Manifold
-        # symbols. (Manifold is intentionally not a Conan requirement; it ships
-        # inside this package instead.)
-        self.cpp_info.libs = ["pycanha-core", "manifold"]
+        self.cpp_info.libs = ["pycanha-core"]
         self.cpp_info.requires = [
             "eigen::eigen3",
             "hdf5::hdf5",
+            "manifold::manifold",
             "spdlog::libspdlog",
             "symengine::symengine",
         ]
@@ -372,13 +375,14 @@ class Recipe_pycanha_core(ConanFile):
                 str(Path(symengine_dep.package_folder) / "include")
             )
 
-        # SymEngine public headers also include <gmp.h>, so downstream
-        # consumers of pycanha-core's public API need GMP headers transitively.
-        gmp_dep = self.dependencies.get("gmp")
-        if gmp_dep is not None and gmp_dep.package_folder:
-            self.cpp_info.includedirs.append(
-                str(Path(gmp_dep.package_folder) / "include")
-            )
+        # SymEngine public headers also include Boost.Multiprecision, so
+        # downstream consumers of pycanha-core's public API need it too.
+        if "boost" in self.dependencies:
+            boost_folder = self.dependencies["boost"].package_folder
+            if boost_folder:
+                self.cpp_info.includedirs.append(
+                    str(Path(boost_folder) / "include")
+                )
 
         if self.options.PYCANHA_OPTION_USE_MKL:
             self.cpp_info.defines.append("PYCANHA_USE_MKL=1")
@@ -554,7 +558,7 @@ class Recipe_pycanha_core(ConanFile):
         mkl_names = ["mkl_intel_lp64", "mkl_intel_thread", "mkl_core", "iomp5"]
         for name in mkl_names:
             so_file = lib_dir / f"lib{name}.so"
-            if so_file.exists() or so_file.is_symlink():
+            if so_file.exists():
                 self.cpp_info.system_libs.append(name)
             else:
                 # No unversioned .so: link by full path to versioned file
@@ -572,15 +576,19 @@ class Recipe_pycanha_core(ConanFile):
     def _ensure_mkl_dev_symlinks(self, lib_dir):
         """Create unversioned .so symlinks if missing.
 
-        pip MKL packages may only ship versioned .so.2 files. The linker
-        needs unversioned .so symlinks to resolve -l flags.
+        pip MKL packages may only ship versioned .so.N files. The linker
+        needs unversioned .so symlinks to resolve -l flags. A link left
+        dangling by an MKL upgrade that changed N (2025 ships .so.2, 2026
+        .so.3) is replaced, since pip does not own it and never removes it.
         """
         if self.settings.os == "Windows":
             return
         for name in ["mkl_intel_lp64", "mkl_intel_thread", "mkl_core", "iomp5"]:
             so_link = lib_dir / f"lib{name}.so"
-            if so_link.exists() or so_link.is_symlink():
+            if so_link.exists():
                 continue
+            if so_link.is_symlink():
+                so_link.unlink()
             versioned = sorted(lib_dir.glob(f"lib{name}.so.*"))
             if versioned:
                 try:

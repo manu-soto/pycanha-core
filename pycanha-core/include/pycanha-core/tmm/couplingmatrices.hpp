@@ -84,6 +84,15 @@ class CouplingMatrices {
     Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_db_copy();
     Eigen::SparseMatrix<double, Eigen::RowMajor> sparse_bb_copy();
 
+    /// Changes whenever a coupling is inserted or removed, or the stored
+    /// couplings move for a new node order; a bulk call changes it once. A
+    /// new value for an existing coupling leaves it unchanged. Solvers compare
+    /// it with the value seen by initialize(), because their patterns and index
+    /// tables are built from the stored entries.
+    [[nodiscard]] std::uint64_t structure_version() const noexcept {
+        return _structure_version;
+    }
+
     // Num couplings
     [[nodiscard]] Index get_num_diff_diff_couplings() const;
     [[nodiscard]] Index get_num_diff_bound_couplings() const;
@@ -118,6 +127,10 @@ class CouplingMatrices {
   private:
     using SparseRowMatrix = Eigen::SparseMatrix<double, Eigen::RowMajor>;
     using StorageIndex = SparseRowMatrix::StorageIndex;
+
+    std::uint64_t _structure_version = 0;
+
+    void note_structure_change() noexcept { ++_structure_version; }
 
     // A coupling position in one block, compared in storage order.
     struct BlockPosition {
@@ -192,6 +205,8 @@ class CouplingMatrices {
         void open();
         void put(const Resolved& resolved, double value, std::uint32_t source);
         // Closes the appends and runs the merges; returns the entries taken.
+        // Bumps the structure version once when a coupling that was not
+        // stored before is stored.
         std::size_t finish(std::span<const double> values, CouplingMerge merge,
                            BulkReport& report);
 
@@ -228,11 +243,12 @@ class CouplingMatrices {
 
     // General bulk path: sorts `entries` by (row, col), keeping call order
     // among duplicates, and merges them into the block in place, from the
-    // back, after one growth of the storage.
-    static void merge_entries(SparseRowMatrix& matrix,
-                              std::vector<BlockEntry>& entries,
-                              std::span<const double> values,
-                              CouplingMerge merge, BulkReport& report);
+    // back, after one growth of the storage. Returns how many couplings it
+    // inserted (the others were already stored).
+    static Index merge_entries(SparseRowMatrix& matrix,
+                               std::vector<BlockEntry>& entries,
+                               std::span<const double> values,
+                               CouplingMerge merge, BulkReport& report);
     static void sort_entries(std::vector<BlockEntry>& entries, Index rows);
     [[nodiscard]] static std::vector<RowGrowth> count_growth(
         SparseRowMatrix& matrix, std::span<const BlockEntry> entries,
@@ -263,28 +279,30 @@ class CouplingMatrices {
     inline std::tuple<Index, Index, bool> _get_internal_node_numbers(Index i,
                                                                      Index j);
 
-    using AddCouplingGeneric = void (*)(
+    // The single-coupling writers return whether they inserted a coupling
+    // that was not stored before.
+    using AddCouplingGeneric = bool (*)(
         Eigen::SparseMatrix<double, Eigen::RowMajor>&, Index, Index, double);
 
     // Static helpers
-    static void _add_ovw_coupling_sparse(
+    static bool _add_ovw_coupling_sparse(
         Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
         Index sp_idx2, double val);
 
-    static void _add_sum_coupling_sparse(
+    static bool _add_sum_coupling_sparse(
         Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
         Index sp_idx2, double val);
 
     // These can also be static (they don't use `this`)
-    static void _add_ovw_coupling_sparse_verbose(
+    static bool _add_ovw_coupling_sparse_verbose(
         Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
         Index sp_idx2, double val);
 
-    static void _add_sum_coupling_sparse_verbose(
+    static bool _add_sum_coupling_sparse_verbose(
         Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
         Index sp_idx2, double val);
 
-    static void _add_new_coupling_sparse(
+    static bool _add_new_coupling_sparse(
         Eigen::SparseMatrix<double, Eigen::RowMajor>&, Index, Index, double);
 
     inline std::tuple<Eigen::SparseMatrix<double, Eigen::RowMajor>*, Index,

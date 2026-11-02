@@ -47,7 +47,7 @@ ThermalModel::ThermalModel(const std::string& model_name)
       _parameters(_tmm->parameters_ptr()),
       _formulas(_tmm->formulas_ptr()),
       _thermal_data(_tmm->thermal_data_ptr()),
-      _solvers(std::make_shared<SolverRegistry>(_tmm)) {
+      _solvers(std::make_shared<solvers::SolverRegistry>(_tmm)) {
     _tmm->associate_solvers(*_solvers);
     _callbacks = std::make_shared<CallbackRegistry>(*this);
 }
@@ -61,7 +61,7 @@ ThermalModel::ThermalModel(std::string model_name,
       _parameters(_tmm->parameters_ptr()),
       _formulas(_tmm->formulas_ptr()),
       _thermal_data(_tmm->thermal_data_ptr()),
-      _solvers(std::make_shared<SolverRegistry>(_tmm)) {
+      _solvers(std::make_shared<solvers::SolverRegistry>(_tmm)) {
     // TODO: If GMM later depends on shared model resources, validate here
     // that the injected GMM and TMM reference the same instances.
     _tmm->associate_solvers(*_solvers);
@@ -94,9 +94,9 @@ const ThermalData& ThermalModel::thermal_data() const noexcept {
     return *_thermal_data;
 }
 
-SolverRegistry& ThermalModel::solvers() noexcept { return *_solvers; }
+solvers::SolverRegistry& ThermalModel::solvers() noexcept { return *_solvers; }
 
-const SolverRegistry& ThermalModel::solvers() const noexcept {
+const solvers::SolverRegistry& ThermalModel::solvers() const noexcept {
     return *_solvers;
 }
 

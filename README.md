@@ -8,3 +8,9 @@
 [![docs](https://img.shields.io/badge/doc-GitHub%20Pages-blue)](https://pycanha-project.github.io/pycanha-core/)
 
 This is the repository of the C++ core of [*pycanha*](https://github.com/pycanha-project/pycanha)
+
+## License
+
+pycanha-core is released under the [MIT License](LICENSE). It builds on several
+third-party libraries; their licenses, and the notices that must accompany any
+binary built from pycanha-core, are collected in [`LICENSES/`](LICENSES/README.md).

@@ -14,6 +14,12 @@
 #include "pycanha-core/globals.hpp"
 #include "pycanha-core/parameters/variable.hpp"
 #include "pycanha-core/tmm/bulk.hpp"
+#include "pycanha-core/tmm/thermalnetwork.hpp"
+
+namespace pycanha::solvers {
+class Solver;
+class SolverRegistry;
+}  // namespace pycanha::solvers
 
 namespace pycanha {
 
@@ -25,8 +31,6 @@ class Node;
 class Nodes;
 class Parameters;
 class RadiativeCouplings;
-class Solver;
-class SolverRegistry;
 class ThermalData;
 class ThermalNetwork;
 class ThermalMathematicalModel;
@@ -106,6 +110,11 @@ class ThermalMathematicalModel {
     [[nodiscard]] const RadiativeCouplings& radiative_couplings()
         const noexcept;
 
+    /// Structure versions of the nodes and of the conductive and radiative
+    /// couplings, see ThermalNetwork::structure_versions. Solvers compare
+    /// them with the snapshot taken by initialize().
+    [[nodiscard]] StructureVersions structure_versions() const noexcept;
+
     void add_node(Node node);
     void add_node(Index node_num);
     /// Bulk node insertion, see Nodes::add_nodes.
@@ -162,11 +171,11 @@ class ThermalMathematicalModel {
     void callback_transient_time_change();
     void callback_transient_after_timestep();
 
-    void associate_solvers(SolverRegistry& solvers) noexcept;
-    [[nodiscard]] SolverRegistry& solvers();
-    [[nodiscard]] const SolverRegistry& solvers() const;
-    void set_current_callback_solver(Solver* solver) noexcept;
-    [[nodiscard]] Solver* current_callback_solver() const noexcept;
+    void associate_solvers(solvers::SolverRegistry& solvers) noexcept;
+    [[nodiscard]] solvers::SolverRegistry& solvers();
+    [[nodiscard]] const solvers::SolverRegistry& solvers() const;
+    void set_current_callback_solver(solvers::Solver* solver) noexcept;
+    [[nodiscard]] solvers::Solver* current_callback_solver() const noexcept;
     [[nodiscard]] std::optional<Entity> find_entity(
         std::string_view text) const;
     [[nodiscard]] Entity entity(std::string_view text) const;
@@ -196,8 +205,8 @@ class ThermalMathematicalModel {
     std::shared_ptr<Parameters> _parameters_shptr;
     std::shared_ptr<Formulas> _formulas_shptr;
     std::shared_ptr<ThermalData> _thermal_data_shptr;
-    SolverRegistry* _solvers{nullptr};
-    Solver* _current_callback_solver{nullptr};
+    solvers::SolverRegistry* _solvers{nullptr};
+    solvers::Solver* _current_callback_solver{nullptr};
     EntitiesHelper _entities{*this};
     double* _time_parameter_ptr{nullptr};
     std::unordered_map<std::string, TimeVariable> _time_variables;

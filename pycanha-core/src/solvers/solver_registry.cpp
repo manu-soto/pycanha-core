@@ -4,53 +4,70 @@
 #include <stdexcept>
 #include <utility>
 
-#include "pycanha-core/solvers/sslu.hpp"
-#include "pycanha-core/solvers/sslu_cgs.hpp"
-#include "pycanha-core/solvers/tscnrlds.hpp"
-#include "pycanha-core/solvers/tscnrlds_jacobian.hpp"
+#include "pycanha-core/solvers/crank_nicolson.hpp"
+#include "pycanha-core/solvers/jacobian_propagation.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 
-namespace pycanha {
+namespace pycanha::solvers {
 
-SolverRegistry::SolverRegistry(std::shared_ptr<ThermalMathematicalModel> tmm)
-    : _tmm(std::move(tmm)) {
-    if (_tmm == nullptr) {
+namespace {
+
+std::shared_ptr<ThermalMathematicalModel> require_model(
+    std::shared_ptr<ThermalMathematicalModel> tmm) {
+    if (tmm == nullptr) {
         throw std::invalid_argument(
             "SolverRegistry requires a ThermalMathematicalModel");
     }
+    return tmm;
 }
+
+}  // namespace
+
+SteadySolvers::SteadySolvers(std::shared_ptr<ThermalMathematicalModel> tmm)
+    : _tmm(std::move(tmm)) {}
+
+SteadySolvers::~SteadySolvers() = default;
+
+steady::SteadyState& SteadySolvers::steady_state() {
+    if (_steady_state == nullptr) {
+        _steady_state = std::make_unique<steady::SteadyState>(_tmm);
+    }
+    return *_steady_state;
+}
+
+TransientSolvers::TransientSolvers(
+    std::shared_ptr<ThermalMathematicalModel> tmm)
+    : _tmm(std::move(tmm)) {}
+
+TransientSolvers::~TransientSolvers() = default;
+
+transient::CrankNicolson& TransientSolvers::crank_nicolson() {
+    if (_crank_nicolson == nullptr) {
+        _crank_nicolson = std::make_unique<transient::CrankNicolson>(_tmm);
+    }
+    return *_crank_nicolson;
+}
+
+SensitivitySolvers::SensitivitySolvers(
+    std::shared_ptr<ThermalMathematicalModel> tmm)
+    : _tmm(std::move(tmm)) {}
+
+SensitivitySolvers::~SensitivitySolvers() = default;
+
+sensitivity::JacobianPropagation& SensitivitySolvers::jacobian_propagation() {
+    if (_jacobian_propagation == nullptr) {
+        _jacobian_propagation =
+            std::make_unique<sensitivity::JacobianPropagation>(_tmm);
+    }
+    return *_jacobian_propagation;
+}
+
+SolverRegistry::SolverRegistry(std::shared_ptr<ThermalMathematicalModel> tmm)
+    : _tmm(require_model(std::move(tmm))),
+      _steady(_tmm),
+      _transient(_tmm),
+      _sensitivity(_tmm) {}
 
 SolverRegistry::~SolverRegistry() = default;
 
-SSLU& SolverRegistry::sslu() {
-    if (_sslu == nullptr) {
-        _sslu = std::make_unique<SSLU>(_tmm);
-    }
-
-    return *_sslu;
-}
-
-SSLU_CGS& SolverRegistry::sslu_cgs() {
-    if (_sslu_cgs == nullptr) {
-        _sslu_cgs = std::make_unique<SSLU_CGS>(_tmm);
-    }
-
-    return *_sslu_cgs;
-}
-
-TSCNRLDS& SolverRegistry::tscnrlds() {
-    if (_tscnrlds == nullptr) {
-        _tscnrlds = std::make_unique<TSCNRLDS>(_tmm);
-    }
-
-    return *_tscnrlds;
-}
-
-TSCNRLDS_JACOBIAN& SolverRegistry::tscnrlds_jacobian() {
-    if (_tscnrlds_jacobian == nullptr) {
-        _tscnrlds_jacobian = std::make_unique<TSCNRLDS_JACOBIAN>(_tmm);
-    }
-
-    return *_tscnrlds_jacobian;
-}
-
-}  // namespace pycanha
+}  // namespace pycanha::solvers

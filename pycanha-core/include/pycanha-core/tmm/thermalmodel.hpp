@@ -6,12 +6,15 @@
 #include "pycanha-core/conduction/options.hpp"
 #include "pycanha-core/gmm/geometrymodel.hpp"
 
+namespace pycanha::solvers {
+class SolverRegistry;
+}  // namespace pycanha::solvers
+
 namespace pycanha {
 
 class Formulas;
 class Parameters;
 class CallbackRegistry;
-class SolverRegistry;
 class ThermalData;
 class ThermalMathematicalModel;
 
@@ -45,8 +48,8 @@ class ThermalModel {
     [[nodiscard]] ThermalData& thermal_data() noexcept;
     [[nodiscard]] const ThermalData& thermal_data() const noexcept;
 
-    [[nodiscard]] SolverRegistry& solvers() noexcept;
-    [[nodiscard]] const SolverRegistry& solvers() const noexcept;
+    [[nodiscard]] solvers::SolverRegistry& solvers() noexcept;
+    [[nodiscard]] const solvers::SolverRegistry& solvers() const noexcept;
 
     [[nodiscard]] CallbackRegistry& callbacks() noexcept;
     [[nodiscard]] const CallbackRegistry& callbacks() const noexcept;
@@ -66,7 +69,7 @@ class ThermalModel {
     std::shared_ptr<Parameters> _parameters;
     std::shared_ptr<Formulas> _formulas;
     std::shared_ptr<ThermalData> _thermal_data;
-    std::shared_ptr<SolverRegistry> _solvers;
+    std::shared_ptr<solvers::SolverRegistry> _solvers;
     std::shared_ptr<CallbackRegistry> _callbacks;
 };
 

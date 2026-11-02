@@ -345,7 +345,7 @@ TEST_CASE("ThermalMathematicalModel surfaces missing solver associations",
 
     auto shared_model =
         std::make_shared<ThermalMathematicalModel>("associated-model");
-    SolverRegistry registry(shared_model);
+    solvers::SolverRegistry registry(shared_model);
     shared_model->associate_solvers(registry);
 
     REQUIRE(&shared_model->solvers() == &registry);

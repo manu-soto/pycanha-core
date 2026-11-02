@@ -17,7 +17,7 @@
 #include "pycanha-core/gmm/primitives/rectangle.hpp"
 #include "pycanha-core/gmm/scene/geometry_item.hpp"
 #include "pycanha-core/solvers/solver_registry.hpp"
-#include "pycanha-core/solvers/sslu.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 #include "pycanha-core/tmm/conductivecouplings.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/nodes.hpp"
@@ -130,10 +130,10 @@ TEST_CASE("gmm -> tmm: the generated network solves at steady state",
     model.tmm().add_conductive_coupling(0, 1, cell_conductance);
     model.tmm().nodes().set_qi(4, 1.0);
 
-    auto& solver = model.solvers().sslu();
+    auto& solver = model.solvers().steady().steady_state();
     solver.initialize();
     solver.solve();
-    REQUIRE(solver.solver_converged);
+    REQUIRE(solver.converged());
 
     // 1 W crosses every conductor of the chain, so the profile is linear.
     for (pycanha::NodeNum node_num = 1; node_num <= 4; ++node_num) {

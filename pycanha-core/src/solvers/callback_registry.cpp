@@ -8,7 +8,8 @@
 
 namespace pycanha {
 
-CallbackContext::CallbackContext(ThermalModel& tm, Solver* solver) noexcept
+CallbackContext::CallbackContext(ThermalModel& tm,
+                                 solvers::Solver* solver) noexcept
     : _tm(&tm), _solver(solver) {}
 
 ThermalModel& CallbackContext::tm() noexcept { return *_tm; }
@@ -21,7 +22,7 @@ const ThermalMathematicalModel& CallbackContext::tmm() const noexcept {
     return _tm->tmm();
 }
 
-Solver& CallbackContext::solver() {
+solvers::Solver& CallbackContext::solver() {
     if (_solver == nullptr) {
         throw std::runtime_error("CallbackContext has no active solver");
     }
@@ -29,7 +30,7 @@ Solver& CallbackContext::solver() {
     return *_solver;
 }
 
-const Solver& CallbackContext::solver() const {
+const solvers::Solver& CallbackContext::solver() const {
     if (_solver == nullptr) {
         throw std::runtime_error("CallbackContext has no active solver");
     }

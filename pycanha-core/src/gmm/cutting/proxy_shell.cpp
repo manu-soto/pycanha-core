@@ -1,5 +1,6 @@
 #include "pycanha-core/gmm/cutting/proxy_shell.hpp"
 
+#include <manifold/common.h>
 #include <manifold/manifold.h>
 
 #include <array>

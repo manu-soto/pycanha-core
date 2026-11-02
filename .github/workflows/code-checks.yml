@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
     - name: Check out repo's default branch
-      uses: actions/checkout@v3
+      uses: actions/checkout@v7
     - name: Install cpplint
       run: |
         pip install cpplint
@@ -28,9 +28,9 @@ jobs:
           - 'pycanha-core'
           - 'test'
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     - name: Run clang-format style check.
-      uses: jidicula/clang-format-action@v4.11.0
+      uses: jidicula/clang-format-action@v4.18.0
       with:
         clang-format-version: '22'
         check-path: ${{ matrix.path}}
@@ -42,7 +42,7 @@ jobs:
 
     steps:
     - name: Check out repo's default branch
-      uses: actions/checkout@v3
+      uses: actions/checkout@v7
     - name: Install conan, cmake, cppcheck and clang-tidy 22
       run: |
         pip install conan

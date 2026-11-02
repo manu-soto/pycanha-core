@@ -12,6 +12,7 @@
 #include "pycanha-core/globals.hpp"
 #include "pycanha-core/tmm/bulk.hpp"
 #include "pycanha-core/tmm/conductivecouplings.hpp"
+#include "pycanha-core/tmm/couplingmatrices.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/nodes.hpp"
 #include "pycanha-core/tmm/radiativecouplings.hpp"
@@ -110,6 +111,12 @@ BulkReport ThermalNetwork::add_nodes(const NodeBatch& batch) {
 void ThermalNetwork::synchronize_structure() {
     _conductive_couplings->_couplings.synchronize_structure();
     _radiative_couplings->_couplings.synchronize_structure();
+}
+
+StructureVersions ThermalNetwork::structure_versions() const noexcept {
+    return {.nodes = _nodes->structure_version(),
+            .conductive = conductive_matrices().structure_version(),
+            .radiative = radiative_matrices().structure_version()};
 }
 
 void ThermalNetwork::remove_node(Index node_num) {

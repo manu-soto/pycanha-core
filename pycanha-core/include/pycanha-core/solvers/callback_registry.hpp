@@ -2,27 +2,30 @@
 
 #include <functional>
 
+namespace pycanha::solvers {
+class Solver;
+}  // namespace pycanha::solvers
+
 namespace pycanha {
 
-class Solver;
 class ThermalMathematicalModel;
 class ThermalModel;
 
 class CallbackContext {
   public:
-    CallbackContext(ThermalModel& tm, Solver* solver) noexcept;
+    CallbackContext(ThermalModel& tm, solvers::Solver* solver) noexcept;
 
     [[nodiscard]] ThermalModel& tm() noexcept;
     [[nodiscard]] const ThermalModel& tm() const noexcept;
     [[nodiscard]] ThermalMathematicalModel& tmm() noexcept;
     [[nodiscard]] const ThermalMathematicalModel& tmm() const noexcept;
-    [[nodiscard]] Solver& solver();
-    [[nodiscard]] const Solver& solver() const;
+    [[nodiscard]] solvers::Solver& solver();
+    [[nodiscard]] const solvers::Solver& solver() const;
     [[nodiscard]] double time() const noexcept;
 
   private:
     ThermalModel* _tm{nullptr};
-    Solver* _solver{nullptr};
+    solvers::Solver* _solver{nullptr};
 };
 
 class CallbackRegistry {

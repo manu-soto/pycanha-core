@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -14,6 +15,19 @@ class ConductiveCouplings;
 class RadiativeCouplings;
 class CouplingMatrices;
 class SteadyStateNonSymmetricSolver;
+
+/// Structure versions of the three parts of a network: the nodes (see
+/// Nodes::structure_version) and the conductive and radiative coupling
+/// patterns (see CouplingMatrices::structure_version). Two equal snapshots of
+/// one network mean the same nodes in the same order and the same stored
+/// couplings; values may differ.
+struct StructureVersions {
+    std::uint64_t nodes = 0;
+    std::uint64_t conductive = 0;
+    std::uint64_t radiative = 0;
+
+    [[nodiscard]] bool operator==(const StructureVersions&) const = default;
+};
 
 class ThermalNetwork {
     friend class Nodes;
@@ -40,6 +54,10 @@ class ThermalNetwork {
     /// Sizes both coupling containers to the current nodes (nodes appended
     /// at the end of their block grow them lazily).
     void synchronize_structure();
+
+    /// Snapshot of the structure versions of the nodes and both coupling
+    /// containers.
+    [[nodiscard]] StructureVersions structure_versions() const noexcept;
 
     [[nodiscard]] Nodes& nodes() noexcept;
     [[nodiscard]] const Nodes& nodes() const noexcept;

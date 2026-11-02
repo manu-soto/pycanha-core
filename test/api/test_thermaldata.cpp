@@ -6,15 +6,25 @@
 
 #include "pycanha-core/parameters/formulas.hpp"
 #include "pycanha-core/parameters/parameters.hpp"
+#include "pycanha-core/solvers/crank_nicolson.hpp"
+#include "pycanha-core/solvers/jacobian_propagation.hpp"
+#include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/solvers/solver_registry.hpp"
-#include "pycanha-core/solvers/tscnrlds.hpp"
-#include "pycanha-core/solvers/tscnrlds_jacobian.hpp"
 #include "pycanha-core/thermaldata/lookup_table.hpp"
 #include "pycanha-core/thermaldata/thermaldata.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/thermalmodel.hpp"
 
 namespace {
+
+// The iteration limit and the convergence tolerance [K] of a solver.
+pycanha::solvers::Settings iteration_settings(int max_iterations,
+                                              double tolerance) {
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = max_iterations;
+    settings.tolerance = tolerance;
+    return settings;
+}
 
 void populate_transient_demo(pycanha::ThermalModel& tm) {
     pycanha::Node sink(100);
@@ -34,9 +44,8 @@ void populate_transient_demo(pycanha::ThermalModel& tm) {
 }
 
 void solve_transient(pycanha::ThermalModel& tm) {
-    auto& solver = tm.solvers().tscnrlds();
-    solver.max_iters = 20;
-    solver.abstol_temp = 1.0e-9;
+    auto& solver = tm.solvers().transient().crank_nicolson();
+    solver.set_settings(iteration_settings(20, 1.0e-9));
     solver.set_simulation_time(0.0, 2.0, 0.1, 0.5);
     solver.initialize();
     solver.solve();
@@ -71,9 +80,8 @@ void populate_jacobian_demo(pycanha::ThermalModel& tm,
 }
 
 Eigen::MatrixXd solve_jacobian(pycanha::ThermalModel& tm) {
-    auto& solver = tm.solvers().tscnrlds_jacobian();
-    solver.max_iters = 50;
-    solver.abstol_temp = 1.0e-9;
+    auto& solver = tm.solvers().sensitivity().jacobian_propagation();
+    solver.set_settings(iteration_settings(50, 1.0e-9));
     solver.set_simulation_time(0.0, 5.0, 0.01, 0.1);
     solver.initialize();
     solver.solve();
@@ -98,11 +106,11 @@ TEST_CASE("ThermalData keeps transient models separate from user tables",
     tm.thermal_data().tables().add_table("heater_schedule",
                                          pycanha::LookupTableVec1D(x, y));
     REQUIRE(tm.thermal_data().tables().has_table("heater_schedule"));
-    REQUIRE_FALSE(tm.thermal_data().models().has_model("TSCNRLDS"));
+    REQUIRE_FALSE(tm.thermal_data().models().has_model("crank_nicolson"));
 
     solve_transient(tm);
 
-    auto& transient = tm.solvers().tscnrlds();
+    auto& transient = tm.solvers().transient().crank_nicolson();
     REQUIRE(tm.thermal_data().models().size() == 1);
     const auto model_names = tm.thermal_data().models().model_names();
     REQUIRE(model_names.size() == 1);
@@ -126,16 +134,26 @@ TEST_CASE("Jacobian columns follow the derivative parameter order",
     populate_jacobian_demo(second, {"k", "C"});
     const auto& second_matrix = solve_jacobian(second);
 
-    REQUIRE(first.solvers().tscnrlds_jacobian().derivative_parameter_names().at(
-                0) == "C");
-    REQUIRE(first.solvers().tscnrlds_jacobian().derivative_parameter_names().at(
-                1) == "k");
-    REQUIRE(
-        second.solvers().tscnrlds_jacobian().derivative_parameter_names().at(
-            0) == "k");
-    REQUIRE(
-        second.solvers().tscnrlds_jacobian().derivative_parameter_names().at(
-            1) == "C");
+    REQUIRE(first.solvers()
+                .sensitivity()
+                .jacobian_propagation()
+                .derivative_parameter_names()
+                .at(0) == "C");
+    REQUIRE(first.solvers()
+                .sensitivity()
+                .jacobian_propagation()
+                .derivative_parameter_names()
+                .at(1) == "k");
+    REQUIRE(second.solvers()
+                .sensitivity()
+                .jacobian_propagation()
+                .derivative_parameter_names()
+                .at(0) == "k");
+    REQUIRE(second.solvers()
+                .sensitivity()
+                .jacobian_propagation()
+                .derivative_parameter_names()
+                .at(1) == "C");
 
     REQUIRE(first_matrix.rows() == 1);
     REQUIRE(first_matrix.cols() == 2);

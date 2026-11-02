@@ -5,7 +5,9 @@
 #include <Eigen/Core>
 #include <memory>
 
+#include "pycanha-core/config.hpp"
 #include "pycanha-core/globals.hpp"
+#include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/tmm/conductivecouplings.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/nodes.hpp"
@@ -18,8 +20,19 @@ using Model = std::shared_ptr<ThermalMathematicalModel>;
 inline constexpr int boundary_node = 100000;
 inline constexpr int space_node = 100001;
 
+// The backend of sparse storage by default in this build and on this
+// machine: PARDISO with MKL, otherwise Accelerate where available, otherwise
+// Eigen.
+inline solvers::Backend default_sparse_backend() {
+    if (MKL_ENABLED) {
+        return solvers::Backend::PARDISO;
+    }
+    return solvers::accelerate_available() ? solvers::Backend::ACCELERATE
+                                           : solvers::Backend::EIGEN;
+}
+
 // Two conductive and five radiative couplings; the expected steady state is
-// known (the SSLU reference test).
+// known (the steady-state reference test).
 inline Model make_small_radiative_model() {
     auto model = std::make_shared<ThermalMathematicalModel>("small");
     for (const int num : {10, 15, 20, 25}) {
@@ -129,6 +142,23 @@ inline Model make_floating_model(bool radiation) {
     if (radiation) {
         model->add_radiative_coupling(3, 9, 0.1);
     }
+    return model;
+}
+
+// One diffusive node conductively coupled to a boundary node 50 K warmer:
+// one iteration reaches the boundary temperature exactly, so the next one
+// has a zero residual.
+inline Model make_settling_model() {
+    auto model = std::make_shared<ThermalMathematicalModel>("settling");
+    Node node(1);
+    node.set_T(250.0);
+    node.set_C(1.0);
+    model->add_node(node);
+    Node sink(9);
+    sink.set_type(BOUNDARY_NODE);
+    sink.set_T(300.0);
+    model->add_node(sink);
+    model->add_conductive_coupling(1, 9, 1.0);
     return model;
 }
 

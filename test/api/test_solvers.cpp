@@ -3,10 +3,11 @@
 
 #include "pycanha-core/parameters/formulas.hpp"
 #include "pycanha-core/parameters/parameters.hpp"
+#include "pycanha-core/solvers/crank_nicolson.hpp"
+#include "pycanha-core/solvers/jacobian_propagation.hpp"
+#include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/solvers/solver_registry.hpp"
-#include "pycanha-core/solvers/sslu.hpp"
-#include "pycanha-core/solvers/tscnrlds.hpp"
-#include "pycanha-core/solvers/tscnrlds_jacobian.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 #include "pycanha-core/thermaldata/data_model.hpp"
 #include "pycanha-core/thermaldata/thermaldata.hpp"
 #include "pycanha-core/tmm/node.hpp"
@@ -14,6 +15,15 @@
 #include "pycanha-core/tmm/thermalmodel.hpp"
 
 namespace {
+
+// The iteration limit and the convergence tolerance [K] of a solver.
+pycanha::solvers::Settings iteration_settings(int max_iterations,
+                                              double tolerance) {
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = max_iterations;
+    settings.tolerance = tolerance;
+    return settings;
+}
 
 void populate_parameterized_steady_model(pycanha::ThermalModel& tm) {
     pycanha::Node plate(1);
@@ -82,22 +92,23 @@ TEST_CASE("SolverRegistry keeps a stable, model-owned solver surface",
 
     auto& registry = tm.solvers();
     REQUIRE(&registry == &tm.tmm().solvers());
-    REQUIRE(&registry.sslu() == &tm.solvers().sslu());
-    REQUIRE(&registry.sslu_cgs() == &tm.solvers().sslu_cgs());
-    REQUIRE(&registry.tscnrlds() == &tm.solvers().tscnrlds());
-    REQUIRE(&registry.tscnrlds_jacobian() == &tm.solvers().tscnrlds_jacobian());
+    REQUIRE(&registry.steady().steady_state() ==
+            &tm.solvers().steady().steady_state());
+    REQUIRE(&registry.transient().crank_nicolson() ==
+            &tm.solvers().transient().crank_nicolson());
+    REQUIRE(&registry.sensitivity().jacobian_propagation() ==
+            &tm.solvers().sensitivity().jacobian_propagation());
 
     // Solvers are configured first, then initialized explicitly. That keeps
     // the lifecycle visible to readers and mirrors how the production API is
     // meant to be used from bindings.
-    auto& steady = registry.sslu();
-    steady.max_iters = 50;
-    steady.abstol_temp = 1.0e-9;
+    auto& steady = registry.steady().steady_state();
+    steady.set_settings(iteration_settings(50, 1.0e-9));
     steady.initialize();
     steady.solve();
 
-    REQUIRE(steady.solver_initialized);
-    REQUIRE(steady.solver_converged);
+    REQUIRE(steady.initialized());
+    REQUIRE(steady.converged());
     REQUIRE(tm.tmm().nodes().get_T(1) == Catch::Approx(260.0));
 
     steady.deinitialize();
@@ -107,14 +118,15 @@ TEST_CASE("SolverRegistry keeps a stable, model-owned solver surface",
     steady.deinitialize();
 }
 
-TEST_CASE("SSLU follows parameter changes between solves", "[api][solvers]") {
-    pycanha::ThermalModel tm("sslu_sweep");
+TEST_CASE("SteadyState follows parameter changes between solves",
+          "[api][solvers]") {
+    pycanha::ThermalModel tm("steady_sweep");
     populate_parameterized_steady_model(tm);
 
-    auto& steady = tm.solvers().sslu();
+    auto& steady = tm.solvers().steady().steady_state();
     steady.initialize();
     steady.solve();
-    REQUIRE(steady.solver_converged);
+    REQUIRE(steady.converged());
     REQUIRE(tm.tmm().nodes().get_T(1) == Catch::Approx(260.0));
 
     // Same values: the factors of the previous solve are reused.
@@ -125,20 +137,20 @@ TEST_CASE("SSLU follows parameter changes between solves", "[api][solvers]") {
     tm.parameters().set_parameter("conductance", 10.0);
     tm.formulas().apply_formulas();
     steady.solve();
-    REQUIRE(steady.solver_converged);
+    REQUIRE(steady.converged());
     REQUIRE(tm.tmm().nodes().get_T(1) == Catch::Approx(255.0));
     steady.deinitialize();
 }
 
 TEST_CASE("Transient solvers write reusable output models", "[api][solvers]") {
     SECTION(
-        "TSCNRLDS stores its output in ThermalData and exposes a shortcut") {
+        "CrankNicolson stores its output in ThermalData and exposes a "
+        "shortcut") {
         pycanha::ThermalModel tm("transient_demo");
         populate_transient_model(tm);
 
-        auto& transient = tm.solvers().tscnrlds();
-        transient.max_iters = 20;
-        transient.abstol_temp = 1.0e-9;
+        auto& transient = tm.solvers().transient().crank_nicolson();
+        transient.set_settings(iteration_settings(20, 1.0e-9));
         transient.set_simulation_time(0.0, 2.0, 0.1, 0.5);
         transient.initialize();
         transient.solve();
@@ -153,15 +165,15 @@ TEST_CASE("Transient solvers write reusable output models", "[api][solvers]") {
         REQUIRE(transient.output_model().T().num_columns() == 2);
     }
 
-    SECTION("TSCNRLDS_JACOBIAN honors the registered derivative parameters") {
+    SECTION("JacobianPropagation honors the registered derivative parameters") {
         pycanha::ThermalModel tm("jacobian_demo");
         populate_jacobian_model(tm);
         tm.formulas().parameters_with_derivatives().add_parameter("C");
         tm.formulas().parameters_with_derivatives().add_parameter("k");
 
-        auto& jacobian_solver = tm.solvers().tscnrlds_jacobian();
-        jacobian_solver.max_iters = 50;
-        jacobian_solver.abstol_temp = 1.0e-9;
+        auto& jacobian_solver =
+            tm.solvers().sensitivity().jacobian_propagation();
+        jacobian_solver.set_settings(iteration_settings(50, 1.0e-9));
         jacobian_solver.set_simulation_time(0.0, 5.0, 0.01, 0.1);
         jacobian_solver.initialize();
         jacobian_solver.solve();

@@ -13,7 +13,8 @@
 
 #include "pycanha-core/globals.hpp"
 #include "pycanha-core/io/esatan.hpp"
-#include "pycanha-core/solvers/sslu.hpp"
+#include "pycanha-core/solvers/settings.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 #include "pycanha-core/thermaldata/data_model.hpp"
 #include "pycanha-core/thermaldata/dense_time_series.hpp"
 #include "pycanha-core/thermaldata/named_constants.hpp"
@@ -22,6 +23,15 @@
 #include "pycanha-core/tmm/thermalmathematicalmodel.hpp"
 
 namespace {
+
+// The iteration limit and the convergence tolerance [K] of a solver.
+pycanha::solvers::Settings iteration_settings(int max_iterations,
+                                              double tolerance) {
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = max_iterations;
+    settings.tolerance = tolerance;
+    return settings;
+}
 
 std::filesystem::path get_esatan_data_dir() {
     const std::filesystem::path this_file(__FILE__);
@@ -98,12 +108,11 @@ TEST_CASE("ESATANReader can import real TMD and model is solvable",
 
     REQUIRE(model->nodes().get_num_nodes() > 0);
 
-    pycanha::SSLU solver(model);
-    solver.max_iters = 2;
-    solver.abstol_temp = 1.0;
+    pycanha::solvers::steady::SteadyState solver(model);
+    solver.set_settings(iteration_settings(2, 1.0));
 
     REQUIRE_NOTHROW(solver.initialize());
-    REQUIRE(solver.solver_initialized);
+    REQUIRE(solver.initialized());
     REQUIRE_NOTHROW(solver.solve());
 }
 

@@ -10,12 +10,22 @@
 #include "pycanha-core/parameters/entity.hpp"
 #include "pycanha-core/parameters/formula.hpp"
 #include "pycanha-core/parameters/formulas.hpp"
-#include "pycanha-core/solvers/tscnrlds_jacobian.hpp"
+#include "pycanha-core/solvers/jacobian_propagation.hpp"
+#include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/thermaldata/thermaldata.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/thermalmathematicalmodel.hpp"
 
 namespace {
+
+// The iteration limit and the convergence tolerance [K] of a solver.
+pycanha::solvers::Settings iteration_settings(int max_iterations,
+                                              double tolerance) {
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = max_iterations;
+    settings.tolerance = tolerance;
+    return settings;
+}
 
 using DerivativeLookup = std::unordered_map<std::string, double>;
 
@@ -423,18 +433,17 @@ TEST_CASE(
     REQUIRE(load_derivatives.at("offset") == Catch::Approx(1.0));
 }
 
-TEST_CASE("ExpressionFormula integrates with TSCNRLDS_JACOBIAN",
+TEST_CASE("ExpressionFormula integrates with JacobianPropagation",
           "[formulas][expression][solver]") {
     auto model = make_jacobian_model();
 
-    pycanha::TSCNRLDS_JACOBIAN solver(model);
-    solver.max_iters = 50;
-    solver.abstol_temp = 1.0e-9;
+    pycanha::solvers::sensitivity::JacobianPropagation solver(model);
+    solver.set_settings(iteration_settings(50, 1.0e-9));
     solver.set_simulation_time(0.0, 5.0, 0.01, 0.1);
     solver.initialize();
     solver.solve();
 
-    REQUIRE(model->thermal_data().models().has_model("TSCNRLDS"));
+    REQUIRE(model->thermal_data().models().has_model("jacobian_propagation"));
     REQUIRE(solver.parameter_names().size() == 2);
     REQUIRE(solver.parameter_names().at(0) == "k");
     REQUIRE(solver.parameter_names().at(1) == "C");
@@ -442,8 +451,10 @@ TEST_CASE("ExpressionFormula integrates with TSCNRLDS_JACOBIAN",
     REQUIRE(solver.derivative_parameter_names().at(0) == "k");
     REQUIRE(solver.derivative_parameter_names().at(1) == "C");
 
-    const auto& jacobian_output =
-        model->thermal_data().models().get_model("TSCNRLDS").jacobian();
+    const auto& jacobian_output = model->thermal_data()
+                                      .models()
+                                      .get_model("jacobian_propagation")
+                                      .jacobian();
     REQUIRE(jacobian_output.num_timesteps() >= 2);
     REQUIRE(jacobian_output.rows() == 1);
     REQUIRE(jacobian_output.cols() == 2);

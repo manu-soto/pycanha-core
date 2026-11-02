@@ -6,13 +6,24 @@
 #include <vector>
 
 #include "pycanha-core/solvers/callback_registry.hpp"
+#include "pycanha-core/solvers/crank_nicolson.hpp"
+#include "pycanha-core/solvers/settings.hpp"
+#include "pycanha-core/solvers/solver.hpp"
 #include "pycanha-core/solvers/solver_registry.hpp"
-#include "pycanha-core/solvers/tscnrlds.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/thermalmathematicalmodel.hpp"
 #include "pycanha-core/tmm/thermalmodel.hpp"
 
 namespace {
+
+// The iteration limit and the convergence tolerance [K] of a solver.
+pycanha::solvers::Settings iteration_settings(int max_iterations,
+                                              double tolerance) {
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = max_iterations;
+    settings.tolerance = tolerance;
+    return settings;
+}
 
 void require_callback_model_refs(pycanha::CallbackContext& context,
                                  const pycanha::ThermalModel& tm) {
@@ -71,13 +82,12 @@ TEST_CASE("ThermalModel callbacks expose root model solver and time",
     tm.callbacks().after_timestep = [&](pycanha::CallbackContext& context) {
         seen_tm = &context.tm();
         seen_tmm = &context.tmm();
-        seen_solver_name = context.solver().solver_name;
+        seen_solver_name = context.solver().name();
         seen_times.push_back(context.time());
     };
 
-    auto& solver = tm.solvers().tscnrlds();
-    solver.max_iters = 20;
-    solver.abstol_temp = 1.0e-9;
+    auto& solver = tm.solvers().transient().crank_nicolson();
+    solver.set_settings(iteration_settings(20, 1.0e-9));
     solver.set_simulation_time(0.0, 20.0, 1.0, 5.0);
 
     solver.initialize();
@@ -86,7 +96,7 @@ TEST_CASE("ThermalModel callbacks expose root model solver and time",
 
     REQUIRE(seen_tm == &tm);
     REQUIRE(seen_tmm == &tm.tmm());
-    REQUIRE(seen_solver_name == "TSCNRLDS");
+    REQUIRE(seen_solver_name == "CrankNicolson");
     REQUIRE_FALSE(seen_times.empty());
     REQUIRE(seen_times.back() > 0.0);
 }

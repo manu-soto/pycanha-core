@@ -7,8 +7,9 @@
 #include "pycanha-core/gmm/geometrymodel.hpp"
 #include "pycanha-core/parameters/formulas.hpp"
 #include "pycanha-core/parameters/parameters.hpp"
+#include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/solvers/solver_registry.hpp"
-#include "pycanha-core/solvers/sslu.hpp"
+#include "pycanha-core/solvers/steady_state.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/thermalmathematicalmodel.hpp"
 #include "pycanha-core/tmm/thermalmodel.hpp"
@@ -78,7 +79,8 @@ TEST_CASE("ThermalModel exposes stable subsystem ownership",
         REQUIRE(&thermal_data == &tmm.thermal_data());
 
         // SolverRegistry lazily owns persistent solver instances.
-        REQUIRE(&solvers.sslu() == &tm.solvers().sslu());
+        REQUIRE(&solvers.steady().steady_state() ==
+                &tm.solvers().steady().steady_state());
 
         const auto& const_tm = std::as_const(tm);
         REQUIRE(&const_tm.tmm() == &tmm);
@@ -128,15 +130,17 @@ TEST_CASE("A minimal ThermalModel solves steady state end to end",
     pycanha::ThermalModel tm("overview_model");
     populate_minimal_model(tm);
 
-    auto& solver = tm.solvers().sslu();
-    solver.max_iters = 50;
-    solver.abstol_temp = 1.0e-9;
+    auto& solver = tm.solvers().steady().steady_state();
+    pycanha::solvers::Settings settings;
+    settings.max_iterations = 50;
+    settings.tolerance = 1.0e-9;
+    solver.set_settings(settings);
 
     solver.initialize();
-    REQUIRE(solver.solver_initialized);
+    REQUIRE(solver.initialized());
 
     solver.solve();
-    REQUIRE(solver.solver_converged);
+    REQUIRE(solver.converged());
 
     REQUIRE(tm.tmm().nodes().get_T(2) == Catch::Approx(boundary_temperature));
     REQUIRE(tm.tmm().nodes().get_T(1) ==

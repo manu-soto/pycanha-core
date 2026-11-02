@@ -18,14 +18,14 @@ The public entry point is `pycanha::ThermalModel`. It owns the main subsystems a
 - `parameters()`: named scalar parameters.
 - `formulas()`: symbolic expressions that map parameters to model quantities such as heat loads, conductances, and capacities.
 - `thermal_data()`: lookup tables and solver-generated output models.
-- `solvers()`: steady-state and transient solver registry.
+- `solvers()`: solver registry, grouped as `steady()`, `transient()` and `sensitivity()`.
 - `callbacks()`: lifecycle hooks for solver-controlled updates during transient runs.
 
 The currently implemented public modules include:
 
 - Thermal network primitives: nodes, couplings, conductive and radiative coupling containers, and thermal network/model wrappers.
 - Parameter and formula infrastructure: entities, variables, formulas, parameter collections, and derivative-aware parameter registration.
-- Solver implementations: `SSLU`, `TSCNRLDS`, and `TSCNRLDS_JACOBIAN`.
+- Solver types: `steady::SteadyState`, `transient::CrankNicolson` and `sensitivity::JacobianPropagation`, all configured through one `solvers::Settings`.
 - Thermal data containers: lookup tables, dense and sparse time series, data models, and stores.
 - Geometry support under `gmm`: primitives, transformations, meshes, triangulation, materials, and geometry model wrappers.
 - Utilities: logging, profiling support, sparse matrix helpers, random generators, and package metadata.
@@ -38,7 +38,7 @@ The intended workflow is:
 2. Add nodes and couplings to `tm.tmm()`.
 3. Register named parameters in `tm.parameters()`.
 4. Bind those parameters to model quantities through `tm.formulas()` and call `apply_formulas()`.
-5. Retrieve a solver from `tm.solvers()`, configure it, then call `initialize()`, `solve()`, and `deinitialize()`.
+5. Retrieve a solver from `tm.solvers()`, configure it with `set_settings()`, then call `initialize()`, `solve()`, and `deinitialize()`.
 6. Read temperatures directly from the model or inspect solver outputs stored in `tm.thermal_data()`.
 
 This is the smallest complete steady-state example exercised by the API tests:
@@ -67,13 +67,13 @@ tm.formulas().add_formula("QI1", "heater_power");
 tm.formulas().add_formula("GL(1,2)", "contact_conductance");
 tm.formulas().apply_formulas();
 
-auto& solver = tm.solvers().sslu();
+auto& solver = tm.solvers().steady().steady_state();
 solver.initialize();
 solver.solve();
 solver.deinitialize();
 ```
 
-Transient workflows follow the same ownership model. `TSCNRLDS` stores its output in `tm.thermal_data().models()`, and `callbacks()` can inject model updates during the solver loop.
+Transient workflows follow the same ownership model. `CrankNicolson` stores its output in `tm.thermal_data().models()`, and `callbacks()` can inject model updates during the solver loop.
 
 ## Build and runtime status
 

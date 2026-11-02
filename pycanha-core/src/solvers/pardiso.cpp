@@ -1,4 +1,4 @@
-#include "pycanha-core/solvers/pardiso.hpp"
+#include "pardiso.hpp"
 
 #if PYCANHA_USE_MKL
 
@@ -6,14 +6,18 @@
 #include <mkl_service.h>
 #include <mkl_types.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <type_traits>
 
+#include "factorizer.hpp"
 #include "pycanha-core/config.hpp"
 #include "pycanha-core/globals.hpp"
+#include "thread_scope.hpp"
 
-namespace pycanha {
+namespace pycanha::solvers::detail {
 
 // Eigen's index arrays are handed to PARDISO without a copy. The build links
 // the LP64 interface, where MKL_INT is a 32-bit int like Eigen's default
@@ -47,39 +51,10 @@ constexpr MKL_INT zero_pivot_error = -4;
 
 constexpr MKL_INT one = 1;
 
-// iparm[3] = 10 * L + K: stop at a relative residual of 10^-L, with CGS
-// (K = 1) for the unsymmetric types or CG (K = 2) for the SPD type. K = 0
-// disables the iteration and is kept as given.
-MKL_INT iterative_control(PardisoSolver::MatrixType type, MKL_INT iparm_3) {
-    constexpr MKL_INT decimal = 10;
-    const MKL_INT method = iparm_3 % decimal;
-    if (method == 0) {
-        return iparm_3;
-    }
-    const MKL_INT method_for_type =
-        type == PardisoSolver::MatrixType::SYMMETRIC_POSITIVE_DEFINITE ? 2 : 1;
-    return (decimal * (iparm_3 / decimal)) + method_for_type;
-}
-
-// Sets the MKL threads of the calling thread for one PARDISO call and
-// restores the previous setting afterwards. 0 leaves MKL's setting.
-class ThreadScope {
-  public:
-    explicit ThreadScope(int threads)
-        : _previous(threads > 0 ? mkl_set_num_threads_local(threads) : -1) {}
-    ~ThreadScope() {
-        if (_previous >= 0) {
-            mkl_set_num_threads_local(_previous);
-        }
-    }
-    ThreadScope(const ThreadScope&) = delete;
-    ThreadScope& operator=(const ThreadScope&) = delete;
-    ThreadScope(ThreadScope&&) = delete;
-    ThreadScope& operator=(ThreadScope&&) = delete;
-
-  private:
-    int _previous;
-};
+constexpr std::size_t iparm_peak_analysis = 14;
+constexpr std::size_t iparm_permanent_analysis = 15;
+constexpr std::size_t iparm_factorization_memory = 16;
+constexpr std::int64_t kilobyte = 1024;
 
 }  // namespace
 
@@ -89,7 +64,8 @@ PardisoSolver::PardisoSolver(MatrixType type, MKL_INT iparm_3) : _type(type) {
 
     _iparm.at(iparm_non_default) = 1;
     _iparm.at(iparm_ordering) = ordering_parallel_metis;
-    _iparm.at(iparm_iterative) = iterative_control(_type, iparm_3);
+    _iparm.at(iparm_iterative) = pardiso_iterative_control(
+        iparm_3, _type == MatrixType::SYMMETRIC_POSITIVE_DEFINITE);
     _iparm.at(iparm_factor_nnz) = report_on;
     _iparm.at(iparm_mflops) = 0;
     // Two-level factorisation. The classic one-level parallel factorisation
@@ -141,6 +117,8 @@ void PardisoSolver::analyze_pattern(const SparseMatrix& matrix) {
 
 void PardisoSolver::factorize(const SparseMatrix& matrix) {
     run_phase(phase_factorization, matrix, one, nullptr, nullptr);
+    _recomputed = true;
+    _has_factors = _error == 0;
 }
 
 void PardisoSolver::factorize_and_solve(const SparseMatrix& matrix,
@@ -149,7 +127,10 @@ void PardisoSolver::factorize_and_solve(const SparseMatrix& matrix,
     // iparm[19] is only written when an iteration is attempted. Clear it so a
     // fresh factorisation does not report the previous call.
     _iparm.at(iparm_cgs_diagnostic) = 0;
+    const bool had_factors = _has_factors;
     run_phase(phase_factorization_solve, matrix, one, b.data(), x.data());
+    _recomputed = !had_factors || _iparm[iparm_cgs_diagnostic] <= 0;
+    _has_factors = _error == 0;
 }
 
 void PardisoSolver::solve(const SparseMatrix& matrix, Eigen::VectorXd& b,
@@ -177,6 +158,8 @@ void PardisoSolver::release() noexcept {
     _analyzed = false;
     _analyzed_non_zeros = 0;
     _last_phase = 0;
+    _has_factors = false;
+    _recomputed = true;
     mkl_free_buffers();
 }
 
@@ -212,14 +195,26 @@ MKL_INT PardisoSolver::cgs_iterations() const noexcept {
 }
 
 bool PardisoSolver::factors_recomputed() const noexcept {
-    return _last_phase != phase_factorization_solve ||
-           _iparm[iparm_cgs_diagnostic] <= 0;
+    return _last_phase != phase_factorization_solve || _recomputed;
 }
 
-bool PardisoSolver::iterative() const noexcept {
+bool PardisoSolver::reuses_factors() const noexcept {
     return _iparm[iparm_iterative] != 0;
 }
 
-}  // namespace pycanha
+std::int64_t PardisoSolver::factor_bytes() const noexcept {
+    const auto peak_analysis =
+        static_cast<std::int64_t>(_iparm[iparm_peak_analysis]);
+    const auto factorization =
+        static_cast<std::int64_t>(_iparm[iparm_permanent_analysis]) +
+        static_cast<std::int64_t>(_iparm[iparm_factorization_memory]);
+    return kilobyte * std::max(peak_analysis, factorization);
+}
+
+bool PardisoSolver::factor_bytes_exact() const noexcept {
+    return _has_factors || _iparm[iparm_two_level] != 0;
+}
+
+}  // namespace pycanha::solvers::detail
 
 #endif  // PYCANHA_USE_MKL

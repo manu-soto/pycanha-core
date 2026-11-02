@@ -266,50 +266,59 @@ void CouplingMatrices::print_sparse() const {
     sparse_utils::print_sparse(sparse_bb);
 }
 
-void CouplingMatrices::_add_ovw_coupling_sparse(
+bool CouplingMatrices::_add_ovw_coupling_sparse(
     Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
     Index sp_idx2, double val) {
+    const bool inserted =
+        sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2);
     sparse.coeffRef(sp_idx1, sp_idx2) = val;
+    return inserted;
 }
 
-void CouplingMatrices::_add_ovw_coupling_sparse_verbose(
+bool CouplingMatrices::_add_ovw_coupling_sparse_verbose(
     Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
     Index sp_idx2, double val) {
-    if (!sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2)) {
-        double& coupling_val = sparse.coeffRef(sp_idx1, sp_idx2);
-        if (!are_coupling_values_almost_equal(coupling_val, val)) {
-            SPDLOG_LOGGER_WARN(pycanha::get_logger(),
-                               "Duplicated coupling at indexes ({}, {}). "
-                               "Overwriting old value: {} with: {}",
-                               sp_idx1, sp_idx2, sparse.coeff(sp_idx1, sp_idx2),
-                               val);
-        }
-        coupling_val = val;
-    } else {
-        _add_ovw_coupling_sparse(sparse, sp_idx1, sp_idx2, val);
+    if (sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2)) {
+        sparse.coeffRef(sp_idx1, sp_idx2) = val;
+        return true;
     }
+    double& coupling_val = sparse.coeffRef(sp_idx1, sp_idx2);
+    if (!are_coupling_values_almost_equal(coupling_val, val)) {
+        SPDLOG_LOGGER_WARN(pycanha::get_logger(),
+                           "Duplicated coupling at indexes ({}, {}). "
+                           "Overwriting old value: {} with: {}",
+                           sp_idx1, sp_idx2, coupling_val, val);
+    }
+    coupling_val = val;
+    return false;
 }
 
-void CouplingMatrices::_add_sum_coupling_sparse(
+bool CouplingMatrices::_add_sum_coupling_sparse(
     Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
     Index sp_idx2, double val) {
+    const bool inserted =
+        sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2);
     sparse.coeffRef(sp_idx1, sp_idx2) += val;
+    return inserted;
 }
 
-void CouplingMatrices::_add_sum_coupling_sparse_verbose(
+bool CouplingMatrices::_add_sum_coupling_sparse_verbose(
     Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
     Index sp_idx2, double val) {
-    if (!sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2)) {
+    const bool inserted =
+        sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2);
+    if (!inserted) {
         SPDLOG_LOGGER_WARN(pycanha::get_logger(),
                            "Duplicated coupling at indexes ({}, {}). "
                            "Adding up old value: {} with: {}",
                            sp_idx1, sp_idx2, sparse.coeff(sp_idx1, sp_idx2),
                            val);
     }
-    _add_sum_coupling_sparse(sparse, sp_idx1, sp_idx2, val);
+    sparse.coeffRef(sp_idx1, sp_idx2) += val;
+    return inserted;
 }
 
-void CouplingMatrices::_add_new_coupling_sparse(
+bool CouplingMatrices::_add_new_coupling_sparse(
     Eigen::SparseMatrix<double, Eigen::RowMajor>& sparse, Index sp_idx1,
     Index sp_idx2, double val) {
     if (!sparse_utils::is_trivial_zero(sparse, sp_idx1, sp_idx2)) {
@@ -317,9 +326,10 @@ void CouplingMatrices::_add_new_coupling_sparse(
                            "Duplicated coupling at indexes ({}, {}). "
                            "Old value: {} left unchanged.",
                            sp_idx1, sp_idx2, sparse.coeff(sp_idx1, sp_idx2));
-        return;
+        return false;
     }
-    _add_ovw_coupling_sparse(sparse, sp_idx1, sp_idx2, val);
+    sparse.coeffRef(sp_idx1, sp_idx2) = val;
+    return true;
 }
 
 inline std::tuple<Eigen::SparseMatrix<double, Eigen::RowMajor>*, Index, Index>
@@ -383,7 +393,9 @@ void CouplingMatrices::_validate_coupling_call_add_generic(
     }
 
     // Call the plain function pointer (no narrowing: Index -> Index)
-    add_coupling_fun(*sp_ptr, sp_idx1, sp_idx2, val);
+    if (add_coupling_fun(*sp_ptr, sp_idx1, sp_idx2, val)) {
+        note_structure_change();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +618,9 @@ BulkReport CouplingMatrices::append_couplings(
         report.accepted += chunk.idx_1.size();
     }
     appenders.finish();
+    if (report.accepted > 0) {
+        note_structure_change();
+    }
 
     if (report.rejected > 0) {
         SPDLOG_LOGGER_WARN(pycanha::get_logger(),
@@ -659,15 +674,22 @@ std::size_t CouplingMatrices::BulkWriter::finish(std::span<const double> values,
                                                  CouplingMerge merge,
                                                  BulkReport& report) {
     std::size_t taken = 0;
+    Index inserted = 0;
     for (std::size_t block_id = 0; block_id < _blocks.size(); ++block_id) {
         Block& target = _blocks.at(block_id);
         if (target.appender.has_value()) {
             target.appender->finish();
+            // Appended entries all come after what the block stored.
+            inserted += target.count;
         } else {
-            merge_entries(_matrices->block(static_cast<int>(block_id)),
-                          target.pending, values, merge, report);
+            inserted +=
+                merge_entries(_matrices->block(static_cast<int>(block_id)),
+                              target.pending, values, merge, report);
         }
         taken += to_sizet(target.count);
+    }
+    if (inserted > 0) {
+        _matrices->note_structure_change();
     }
     return taken;
 }
@@ -810,19 +832,20 @@ Index CouplingMatrices::merge_row(SpMat& matrix,
     return write;
 }
 
-void CouplingMatrices::merge_entries(SpMat& matrix,
-                                     std::vector<BlockEntry>& entries,
-                                     std::span<const double> values,
-                                     CouplingMerge merge, BulkReport& report) {
+Index CouplingMatrices::merge_entries(SpMat& matrix,
+                                      std::vector<BlockEntry>& entries,
+                                      std::span<const double> values,
+                                      CouplingMerge merge, BulkReport& report) {
     if (entries.empty()) {
-        return;
+        return 0;
     }
     matrix.makeCompressed();
     sort_entries(entries, matrix.outerSize());
     const std::vector<RowGrowth> growth = count_growth(matrix, entries, report);
-    Index shift = std::accumulate(
+    const Index inserted = std::accumulate(
         growth.begin(), growth.end(), Index{0},
         [](Index sum, const RowGrowth& row) { return sum + row.added; });
+    Index shift = inserted;
     matrix.resizeNonZeros(matrix.nonZeros() + shift);
     const auto outer = outer_of(matrix);
     const auto inner = inner_of(matrix);
@@ -859,6 +882,7 @@ void CouplingMatrices::merge_entries(SpMat& matrix,
         --pending_rows;
         entry_end = entry_begin;
     }
+    return inserted;
 }
 
 void CouplingMatrices::reorder(std::span<const Index> old_to_new,
@@ -907,6 +931,8 @@ void CouplingMatrices::reorder(std::span<const Index> old_to_new,
     for_each_entry([&](const Resolved& resolved, double value) {
         writer.put(resolved, value, source++);
     });
+    // Every stored coupling is written again into the fresh blocks, so the
+    // writer bumps the structure version once when there is any.
     BulkReport report;
     static_cast<void>(writer.finish(values, CouplingMerge::OVERWRITE, report));
 }

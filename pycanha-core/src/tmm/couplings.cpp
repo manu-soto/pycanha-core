@@ -41,6 +41,13 @@ namespace {
     return static_cast<NodeNum>(node_num);
 }
 
+// The structure version of matrices replaced by `replacement`: newer than
+// both, so a solver initialised with either one sees the change.
+[[nodiscard]] std::uint64_t replaced_structure_version(
+    std::uint64_t old_version, const CouplingMatrices& replacement) noexcept {
+    return std::max(old_version, replacement.structure_version()) + 1U;
+}
+
 template <typename SparseMatrix>
 void ensure_sparse_dimensions(SparseMatrix& matrix, Index rows, Index cols) {
     // Nodes appended at the end of their block only add empty rows and
@@ -82,7 +89,10 @@ Couplings& Couplings::operator=(const Couplings& other) {
             _nodes->remove_observer(this);
         }
         _nodes = other._nodes;
+        const std::uint64_t version = replaced_structure_version(
+            _matrices.structure_version(), other._matrices);
         _matrices = other._matrices;
+        _matrices._structure_version = version;
         _synced_version = other._synced_version;
         if (_nodes != nullptr) {
             _nodes->add_observer(this);
@@ -112,7 +122,10 @@ Couplings& Couplings::operator=(Couplings&& other) noexcept {
             other._nodes->remove_observer(&other);
         }
         _nodes = std::move(other._nodes);
+        const std::uint64_t version = replaced_structure_version(
+            _matrices.structure_version(), other._matrices);
         _matrices = std::move(other._matrices);
+        _matrices._structure_version = version;
         _synced_version = other._synced_version;
         if (_nodes != nullptr) {
             _nodes->add_observer(this);
@@ -332,6 +345,7 @@ void Couplings::remap_nodes(char type, std::span<const Index> old_to_new) {
         CouplingMatrices::remap(_matrices.sparse_bb, old_to_new, old_to_new,
                                 bound_count, bound_count);
     }
+    _matrices.note_structure_change();
     _synced_version = _nodes->structure_version();
 }
 

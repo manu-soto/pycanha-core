@@ -24,7 +24,8 @@ set(PYCANHA_USE_MKL_INT 0)
 find_package(Eigen3 REQUIRED CONFIG)
 find_package(spdlog REQUIRED CONFIG)
 find_package(HDF5 REQUIRED COMPONENTS CXX)
-find_package(symengine REQUIRED CONFIG)
+find_package(manifold REQUIRED CONFIG)
+find_package(SymEngine REQUIRED CONFIG)
 
 # Raytracing backends. Off => only the stub (is_available() == false).
 #  - Vulkan (Windows/Linux): vulkan-headers + volk (runtime loader, no
@@ -62,53 +63,6 @@ else()
     set(PYCANHA_RADIATIVE_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/radiative_stub.cpp
     )
-endif()
-
-if(PYCANHA_USE_FETCHCONTENT_MANIFOLD)
-    include(FetchContent)
-
-    set(MANIFOLD_TEST OFF CACHE BOOL "" FORCE)
-    set(MANIFOLD_CROSS_SECTION OFF CACHE BOOL "" FORCE)
-    set(MANIFOLD_PAR OFF CACHE BOOL "" FORCE)
-    set(MANIFOLD_PYBIND OFF CACHE BOOL "" FORCE)
-
-    # Manifold's own CMakeLists defaults BUILD_SHARED_LIBS to ON, so it would
-    # build a shared library (manifold.dll / libmanifold.so / libmanifold.dylib).
-    # We want a *static* manifold that gets archived into the package and linked
-    # statically into consumers (see the package_info() note in conanfile.py):
-    #  - conanfile.py only packages *.a / *.lib, so a shared manifold is not
-    #    installed on Linux/macOS and the consumer's find_package() fails with
-    #    "Library 'manifold' not found in package".
-    #  - a static manifold also removes the need to bundle the manifold runtime
-    #    (manifold.dll) alongside the Python bindings.
-    # Build manifold with PIC so it can be linked into shared consumers (the
-    # nanobind extension); Conan sets CMAKE_POSITION_INDEPENDENT_CODE from fPIC.
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-
-    FetchContent_Declare(
-        manifold
-        GIT_REPOSITORY https://github.com/elalish/manifold.git
-        GIT_TAG v${PYCANHA_OPTION_MANIFOLD_VERSION}
-        GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(manifold)
-    set(PYCANHA_MANIFOLD_TARGET manifold)
-else()
-    find_package(manifold REQUIRED CONFIG)
-    set(PYCANHA_MANIFOLD_TARGET manifold::manifold)
-endif()
-
-# Normalize MANIFOLD_PAR for clang-tidy/tooling.
-# TODO: Check if needed
-get_target_property(_pycanha_manifold_compile_options
-                    ${PYCANHA_MANIFOLD_TARGET}
-                    INTERFACE_COMPILE_OPTIONS)
-if(_pycanha_manifold_compile_options)
-    list(TRANSFORM _pycanha_manifold_compile_options
-         REPLACE "^-DMANIFOLD_PAR=-1$" "-DMANIFOLD_PAR=(-1)")
-    set_target_properties(${PYCANHA_MANIFOLD_TARGET}
-                          PROPERTIES
-                          INTERFACE_COMPILE_OPTIONS
-                          "${_pycanha_manifold_compile_options}")
 endif()
 
 
@@ -194,18 +148,20 @@ add_library(${LIB_NAME} STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/SparseUtils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/callback_registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/solver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/settings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/report.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/auto_configure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/solver_registry.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/ss.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/factorizer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/accelerate.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/linear_solver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/pardiso.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/sslu.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/sslu_cgs.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/ts.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/tscn.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/tscnrl.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/tscnrlds.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/tscnrlds_jacobian.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/sparse_assembly.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/sparse_network.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/dense_assembly.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/dense_network.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/steady_state.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/crank_nicolson.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/jacobian_propagation.cpp
 
     # Pure-CPU radiative services, built regardless of the raytracing option.
     ${CMAKE_CURRENT_SOURCE_DIR}/src/radiative/aggregate.cpp
@@ -236,12 +192,6 @@ target_include_directories(${LIB_NAME}
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-# CDT is entered via #include <CDT/include/CDT.h> through this parent directory.
-# It MUST be a separate call with SYSTEM first (SYSTEM is only recognised as the
-# first argument after the target); folding it into the call above left CDT as a
-# non-system -I, so its third-party-header warnings tripped our -Werror.
-target_include_directories(${LIB_NAME} SYSTEM PRIVATE
-    $<BUILD_INTERFACE:${cdt_SOURCE_DIR}>)
 
 target_link_libraries( ${LIB_NAME}
     PUBLIC
@@ -250,7 +200,7 @@ target_link_libraries( ${LIB_NAME}
     symengine
     PRIVATE
     HDF5::HDF5
-    ${PYCANHA_MANIFOLD_TARGET}
+    manifold::manifold
 )
 
 if(PYCANHA_OPTION_RAYTRACING)
