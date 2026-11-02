@@ -64,6 +64,7 @@ set(UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/parameters/test_formula.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/parameters/test_variable.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/parameters/test_smart_formula.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit/solvers/test_steady_jacobian.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/solvers/test_steady_state.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/solvers/test_crank_nicolson.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/solvers/test_crank_nicolson_outputs.cpp"

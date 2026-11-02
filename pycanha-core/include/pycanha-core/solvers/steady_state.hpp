@@ -1,7 +1,10 @@
 #pragma once
 
+#include <Eigen/Core>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "pycanha-core/solvers/solver.hpp"
 
@@ -29,6 +32,10 @@ namespace pycanha::solvers::steady {
  * node) is reported as an ERROR and leaves the temperatures of that solve
  * untouched; a solve that does not converge within max_iterations logs a
  * WARN and keeps the temperatures of its last iteration.
+ *
+ * After a converged solve(), jacobian() and linear_response() answer what
+ * the steady state does when a parameter or a load changes, to first order,
+ * from one factorization of the network at the converged temperatures.
  */
 class SteadyState : public Solver {
   public:
@@ -57,6 +64,41 @@ class SteadyState : public Solver {
     /// Iterations done by the last solve().
     [[nodiscard]] int iterations() const noexcept { return _report.iterations; }
 
+    /// Derivatives of the diffusive temperatures of the last solve() with
+    /// respect to the parameters selected in
+    /// Formulas::parameters_with_derivatives() [K per unit of the parameter]:
+    /// one row per diffusive node, in the model's order, and one column per
+    /// derivative_parameter_names() entry.
+    /**
+     * The network is linearized at the converged temperatures, which gives
+     * the exact tangent of the energy balance, factorized once, and solved
+     * for the change of the balance each parameter makes through the
+     * ParameterFormula entities it enters: conductive and radiative
+     * couplings, the heat loads (QI, QS, QA, QE, QR) and the temperatures
+     * of boundary nodes. Capacities, and the temperatures of diffusive
+     * nodes (a start value), do not enter a steady state. A coupling that a
+     * callback sets from the temperatures is taken at its converged value:
+     * its own temperature dependence is not in the tangent.
+     *
+     * Throws std::logic_error when the solver is not initialized or the last
+     * solve() did not converge, std::invalid_argument when no derivative
+     * parameter is selected or a selected one enters no ParameterFormula,
+     * and std::runtime_error when the factorization fails.
+     */
+    [[nodiscard]] Eigen::MatrixXd jacobian();
+    /// The parameters of the columns of the last jacobian().
+    [[nodiscard]] const std::vector<std::string>& derivative_parameter_names()
+        const noexcept {
+        return _derivative_parameter_names;
+    }
+    /// First-order change of the diffusive temperatures [K] for heat [W]
+    /// added to the diffusive nodes, at the temperatures of the last
+    /// solve(): one row per diffusive node, in the model's order, and one
+    /// column per load case. The same factorization as jacobian(), one solve
+    /// per column. Throws as jacobian(), and std::invalid_argument when
+    /// `heat` does not have one row per diffusive node.
+    [[nodiscard]] Eigen::MatrixXd linear_response(const Eigen::MatrixXd& heat);
+
   protected:
     void prepare(bool log_warnings) override;
     [[nodiscard]] SolverMemory memory_now() const override;
@@ -75,9 +117,16 @@ class SteadyState : public Solver {
 
     bool _symmetric = false;
     bool _radiation = false;
+    // The network holds the factors of the tangent at the temperatures of
+    // the last converged solve(); solve() and initialize() clear it.
+    bool _tangent_factorized = false;
+    std::vector<std::string> _derivative_parameter_names;
 
     void assemble_rhs();
     [[nodiscard]] bool factorize_and_solve_step();
+    // Linearizes the network at the converged temperatures and factorizes
+    // it, once per solve(). Throws as jacobian().
+    void factorize_tangent();
     void release() noexcept;
 };
 
