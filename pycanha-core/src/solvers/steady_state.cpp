@@ -2,13 +2,23 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "factorizer.hpp"
 #include "linearized_network.hpp"
 #include "memory.hpp"
 #include "pycanha-core/globals.hpp"
+#include "pycanha-core/parameters/entity.hpp"
+#include "pycanha-core/parameters/formula.hpp"
+#include "pycanha-core/parameters/formulas.hpp"
 #include "pycanha-core/solvers/report.hpp"
 #include "pycanha-core/solvers/settings.hpp"
 #include "pycanha-core/solvers/solver.hpp"
@@ -17,6 +27,163 @@
 #include "pycanha-core/utils/profiling.hpp"
 
 namespace pycanha::solvers::steady {
+
+namespace {
+
+// What each selected parameter changes in the network: d(entity)/d(parameter)
+// of every ParameterFormula, collected as JacobianPropagation does.
+struct ParameterChanges {
+    std::vector<std::string> names;
+    // Per parameter: the upper triangle among the diffusive nodes, and the
+    // diffusive x boundary block.
+    std::vector<SpMatRow> conductive;
+    std::vector<SpMatRow> conductive_boundary;
+    std::vector<SpMatRow> radiative;
+    std::vector<SpMatRow> radiative_boundary;
+    // Diffusive nodes x parameters.
+    Eigen::MatrixXd heat;
+    // Boundary nodes x parameters.
+    Eigen::MatrixXd boundary_temperature;
+};
+
+[[nodiscard]] bool is_heat_flux_entity(EntityType type) {
+    return type == EntityType::qs || type == EntityType::qa ||
+           type == EntityType::qe || type == EntityType::qi ||
+           type == EntityType::qr;
+}
+
+[[nodiscard]] Index node_index(const Nodes& nodes, NodeNum node_num) {
+    const auto resolved = nodes.get_idx_from_node_num(node_num);
+    if (!resolved.has_value()) {
+        throw std::invalid_argument(
+            "A parameter formula references the missing node " +
+            std::to_string(node_num));
+    }
+    return *resolved;
+}
+
+void add_change(const Entity& entity, Index column, double value,
+                const Nodes& nodes, Index nd, ParameterChanges& changes) {
+    const auto type = entity.type();
+    const auto parameter = to_sizet(column);
+    if (type == EntityType::gl || type == EntityType::gr) {
+        const bool conductive = type == EntityType::gl;
+        const Index first = node_index(nodes, entity.node_1());
+        const Index second = node_index(nodes, entity.node_2());
+        if (first < nd && second < nd) {
+            auto& matrix = conductive ? changes.conductive[parameter]
+                                      : changes.radiative[parameter];
+            matrix.coeffRef(std::min(first, second), std::max(first, second)) +=
+                value;
+        } else if ((first < nd) != (second < nd)) {
+            auto& matrix = conductive ? changes.conductive_boundary[parameter]
+                                      : changes.radiative_boundary[parameter];
+            const Index diffusive = (first < nd) ? first : second;
+            const Index boundary = (first < nd) ? second : first;
+            matrix.coeffRef(diffusive, boundary - nd) += value;
+        }
+        // Between two boundary nodes: no effect on the diffusive nodes.
+        return;
+    }
+    const Index index = node_index(nodes, entity.node_1());
+    if (is_heat_flux_entity(type)) {
+        if (index < nd) {
+            changes.heat(index, column) += value;
+        }
+        return;
+    }
+    if (type == EntityType::t && index >= nd) {
+        changes.boundary_temperature(index - nd, column) += value;
+    }
+    // A capacity, or the start temperature of a diffusive node: no effect on
+    // a steady state.
+}
+
+ParameterChanges collect_parameter_changes(ThermalMathematicalModel& model,
+                                           Index nd, Index nb) {
+    std::unordered_set<std::string> produced;
+    for (const auto& formula : model.formulas().formulas()) {
+        if (dynamic_cast<ParameterFormula*>(formula.get()) != nullptr) {
+            const auto& dependencies = formula->parameter_dependencies();
+            produced.insert(dependencies.begin(), dependencies.end());
+        }
+    }
+
+    ParameterChanges changes;
+    for (const auto& name :
+         model.formulas().parameters_with_derivatives().parameter_names()) {
+        if (!produced.contains(name)) {
+            throw std::invalid_argument("Derivative parameter '" + name +
+                                        "' is not produced by any "
+                                        "ParameterFormula");
+        }
+        changes.names.push_back(name);
+    }
+    if (changes.names.empty()) {
+        throw std::invalid_argument(
+            "SteadyState::jacobian() requires at least one selected "
+            "derivative parameter");
+    }
+
+    const std::size_t count = changes.names.size();
+    changes.conductive.assign(count, SpMatRow(nd, nd));
+    changes.conductive_boundary.assign(count, SpMatRow(nd, nb));
+    changes.radiative.assign(count, SpMatRow(nd, nd));
+    changes.radiative_boundary.assign(count, SpMatRow(nd, nb));
+    changes.heat = Eigen::MatrixXd::Zero(nd, to_idx(count));
+    changes.boundary_temperature = Eigen::MatrixXd::Zero(nb, to_idx(count));
+
+    std::unordered_map<std::string, Index> columns;
+    for (std::size_t column = 0; column < count; ++column) {
+        columns.emplace(changes.names[column], to_idx(column));
+    }
+
+    for (const auto& formula : model.formulas().formulas()) {
+        auto* parameter_formula =
+            dynamic_cast<ParameterFormula*>(formula.get());
+        if (parameter_formula == nullptr) {
+            continue;
+        }
+        parameter_formula->calculate_derivatives();
+        const auto* derivatives = formula->get_derivative_values();
+        if ((derivatives == nullptr) || derivatives->empty()) {
+            continue;
+        }
+        const auto& dependencies = formula->parameter_dependencies();
+        if (dependencies.size() != derivatives->size()) {
+            throw std::invalid_argument(
+                "Formula derivative metadata size mismatch for " +
+                formula->entity().string_representation());
+        }
+        for (std::size_t dependency = 0; dependency < dependencies.size();
+             ++dependency) {
+            const auto found = columns.find(dependencies[dependency]);
+            if (found != columns.end()) {
+                add_change(formula->entity(), found->second,
+                           derivatives->at(dependency), model.nodes(), nd,
+                           changes);
+            }
+        }
+    }
+    return changes;
+}
+
+// dR_i += sum_j dG_ij (x_j - x_i) over the diffusive nodes j (the upper
+// triangle `domain`) and the boundary nodes (`boundary`).
+void add_coupling_change(const SpMatRow& domain, const SpMatRow& boundary,
+                         const Eigen::VectorXd& x_domain,
+                         const Eigen::VectorXd& x_boundary,
+                         Eigen::VectorXd& change) {
+    const auto symmetric = domain.selfadjointView<Eigen::Upper>();
+    const Eigen::VectorXd row_sums =
+        (symmetric * Eigen::VectorXd::Ones(domain.rows())) +
+        (boundary * Eigen::VectorXd::Ones(boundary.cols()));
+    change.noalias() += symmetric * x_domain;
+    change.noalias() += boundary * x_boundary;
+    change -= row_sums.cwiseProduct(x_domain);
+}
+
+}  // namespace
 
 SteadyState::SteadyState(std::shared_ptr<ThermalMathematicalModel> tmm_shptr)
     : Solver(std::move(tmm_shptr), SolverType::STEADY_STATE) {}
@@ -48,6 +215,7 @@ void SteadyState::initialize() {
 
 void SteadyState::prepare(bool log_warnings) {
     release();
+    _derivative_parameter_names.clear();
     // Throws before anything is built when the settings contradict.
     initialize_common(log_warnings);
     _symmetric = _resolved.factorization == Factorization::CHOLESKY;
@@ -170,6 +338,7 @@ void SteadyState::solve() {
     const FormulaExecutionGuard formula_execution(*this);
 
     _converged = false;
+    _tangent_factorized = false;
     int iterations_done = 0;
     bool converged = false;
 
@@ -233,12 +402,108 @@ void SteadyState::solve() {
     finish_solve_report(start);
 }
 
+void SteadyState::factorize_tangent() {
+    if (!_initialized) {
+        throw std::logic_error(std::string(name()) +
+                               ": initialize() and solve() before jacobian() "
+                               "or linear_response()");
+    }
+    if (!_converged) {
+        throw std::logic_error(std::string(name()) +
+                               ": the last solve() did not converge, so its "
+                               "temperatures are not a steady state");
+    }
+    if (_tangent_factorized) {
+        return;
+    }
+    PYCANHA_PROFILE_SCOPE("Steady state tangent");
+    // The last iteration linearized the network at the temperatures before
+    // its change: linearize again at the converged ones, which gives the
+    // exact tangent A = -dR/dT, and factorize it (no iteration on older
+    // factors).
+    if (_radiation) {
+        _t_cubed_domain = (4.0 * STF_BOLTZ) * Td.array().cube();
+    }
+    _network->linearize(_t_cubed_domain, Td, VectorXd{},
+                        _radiation_linear_term);
+    _network->discard_factors();
+    VectorXd rhs = VectorXd::Ones(nd);
+    VectorXd solution = VectorXd::Zero(nd);
+    if (!_network->solve(rhs, solution).succeeded) {
+        throw std::runtime_error(std::string(name()) +
+                                 ": the factorization at the converged "
+                                 "temperatures failed (" +
+                                 _network->error_message() + ")");
+    }
+    _tangent_factorized = true;
+}
+
+Eigen::MatrixXd SteadyState::jacobian() {
+    PYCANHA_PROFILE_SCOPE("Steady state jacobian");
+    factorize_tangent();
+    ParameterChanges changes = collect_parameter_changes(tmm, nd, nb);
+    const auto count = to_idx(changes.names.size());
+
+    const VectorXd t4_domain = STF_BOLTZ * Td.array().square().square();
+    const VectorXd t4_boundary = STF_BOLTZ * Tb.array().square().square();
+    const VectorXd t3_boundary = (4.0 * STF_BOLTZ) * Tb.array().cube();
+
+    // dR/dp: the couplings' change with x = T (conductive) or sigma T^4
+    // (radiative), the heat loads, and (GL_ib + 4 sigma GR_ib T_b^3) dT_b for
+    // a boundary temperature.
+    Eigen::MatrixXd rhs(nd, count);
+    for (Index column = 0; column < count; ++column) {
+        const auto parameter = to_sizet(column);
+        VectorXd change = changes.heat.col(column);
+        add_coupling_change(changes.conductive[parameter],
+                            changes.conductive_boundary[parameter], Td, Tb,
+                            change);
+        add_coupling_change(changes.radiative[parameter],
+                            changes.radiative_boundary[parameter], t4_domain,
+                            t4_boundary, change);
+        const VectorXd boundary_change =
+            changes.boundary_temperature.col(column);
+        change.noalias() += KLdb * boundary_change;
+        change.noalias() += KRdb * t3_boundary.cwiseProduct(boundary_change);
+        rhs.col(column) = change;
+    }
+
+    Eigen::MatrixXd derivatives = Eigen::MatrixXd::Zero(nd, count);
+    if (!_network->solve(rhs, derivatives)) {
+        throw std::runtime_error(std::string(name()) +
+                                 ": the derivative solve failed (" +
+                                 _network->error_message() + ")");
+    }
+    _derivative_parameter_names = std::move(changes.names);
+    return derivatives;
+}
+
+Eigen::MatrixXd SteadyState::linear_response(const Eigen::MatrixXd& heat) {
+    PYCANHA_PROFILE_SCOPE("Steady state linear response");
+    factorize_tangent();
+    if (heat.rows() != nd) {
+        throw std::invalid_argument(std::string(name()) +
+                                    ": linear_response() needs one row per " +
+                                    "diffusive node (" + std::to_string(nd) +
+                                    "), not " + std::to_string(heat.rows()));
+    }
+    Eigen::MatrixXd rhs = heat;
+    Eigen::MatrixXd response = Eigen::MatrixXd::Zero(nd, heat.cols());
+    if (!_network->solve(rhs, response)) {
+        throw std::runtime_error(std::string(name()) +
+                                 ": the response solve failed (" +
+                                 _network->error_message() + ")");
+    }
+    return response;
+}
+
 void SteadyState::deinitialize() { release(); }
 
 void SteadyState::release() noexcept {
     _network.reset();
     _prepared = false;
     _symmetric = false;
+    _tangent_factorized = false;
     _initialized = false;
 }
 
