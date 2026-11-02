@@ -541,9 +541,15 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
     // What one fixed-point unit of a row is worth in H (m^2).
     std::vector<double> unit(nodes);
     for (std::size_t row = 0; row < nodes; ++row) {
-        unit[row] = in.node_scale[row] /
+        unit[row] = in.cell_multiplier * in.node_scale[row] /
                     (static_cast<double>(in.rays_per_face) * in.fp_scale);
     }
+    // A cell's count: unsigned, or for derivative cells two's complement.
+    const auto cell_count = [&in](std::uint64_t cell) {
+        return in.signed_cells
+                   ? static_cast<double>(static_cast<std::int64_t>(cell))
+                   : static_cast<double>(cell);
+    };
     const unsigned threads = worker_count({}, nodes, nodes * stride);
 
     // The deposits of row m on a lower node n < m belong to the upper entry
@@ -567,7 +573,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
                 if (column < row) {
                     const std::size_t at = next[column]++;
                     lower_row[at] = static_cast<std::uint32_t>(row);
-                    lower_value[at] = static_cast<double>(cell) * unit[row];
+                    lower_value[at] = cell_count(cell) * unit[row];
                 }
             });
         }
@@ -598,7 +604,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
                 return;
             }
             if (column == row) {
-                diagonal[row] = static_cast<double>(cell) * unit[row];
+                diagonal[row] = cell_count(cell) * unit[row];
                 return;
             }
             if (column < nodes) {
@@ -608,7 +614,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
                         emit(lower_row[at], lower_value[at]);
                     }
                 }
-                double value = static_cast<double>(cell) * unit[row];
+                double value = cell_count(cell) * unit[row];
                 if (at < end && lower_row[at] == column) {
                     value += lower_value[at++];
                 }
@@ -620,7 +626,7 @@ NodeExchangeResult assemble_node_exchange(const NodeExchangeInputs& in,
             const double energy =
                 column == lost_cell
                     ? static_cast<double>(static_cast<std::int64_t>(cell))
-                    : static_cast<double>(cell);
+                    : cell_count(cell);
             const std::size_t bucket = column == unassigned
                                            ? unassigned_bucket
                                            : column - unassigned - 1;

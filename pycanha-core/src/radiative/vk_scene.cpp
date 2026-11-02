@@ -43,9 +43,10 @@ constexpr std::uint64_t max_rays_per_chunk_total = 1U << 22U;
 
 constexpr std::uint32_t workgroup_size_x = 64;
 
-// Bindings 0-9 are the shared scene tables; 10-12 are the per-kernel
-// accumulator buffers (kernels that use fewer leave the rest on a dummy).
-constexpr std::uint32_t num_bindings = 12;
+// Bindings 0-9 are the shared scene tables; 10-11 are the per-kernel
+// accumulator buffers (kernels that use fewer leave the rest on a dummy);
+// 12-13 the exchange kernel's absorptance groups and their derivative cells.
+constexpr std::uint32_t num_bindings = 14;
 
 // Host mirrors of the kernel flag bits in common.slang.
 constexpr std::uint32_t flag_normal_emission = 1;
@@ -53,6 +54,9 @@ constexpr std::uint32_t flag_solar_band = 2;
 // exchange.slang's node rows (64 is compact.slang's write pass).
 constexpr std::uint32_t flag_node_rows = 128;
 constexpr std::uint32_t flag_node_forward_only = 256;
+// exchange.slang's absorptance derivatives; their count in bits 10-12.
+constexpr std::uint32_t flag_derivatives = 512;
+constexpr std::uint32_t derivative_count_shift = 10;
 
 // Tolerated float slack when validating that absorptivity + specular +
 // transmission of a band does not exceed one.
@@ -1003,6 +1007,8 @@ void SceneImpl::create_pipelines() {
     write_storage_descriptor(9, _dummy_buf.buffer);
     write_storage_descriptor(10, _dummy_buf.buffer);
     write_storage_descriptor(11, _dummy_buf.buffer);
+    write_storage_descriptor(12, _dummy_buf.buffer);
+    write_storage_descriptor(13, _dummy_buf.buffer);
 }
 
 void SceneImpl::write_storage_descriptor(std::uint32_t binding,
@@ -1113,6 +1119,10 @@ void SceneImpl::accumulate_exchange(ExchangeAccumImpl& acc,
     write_storage_descriptor(9, acc.buffer());
     write_storage_descriptor(10, _dummy_buf.buffer);
     write_storage_descriptor(11, _dummy_buf.buffer);
+    // The exchange kernel reads 12-13 only with flag_derivatives; a node
+    // accumulator may have left them on its own (since freed) buffers.
+    write_storage_descriptor(12, _dummy_buf.buffer);
+    write_storage_descriptor(13, _dummy_buf.buffer);
 
     if (acc.layout() == AccumLayout::Dense) {
         dispatch_rows(kernel, list, settings);
@@ -1164,6 +1174,10 @@ void SceneImpl::accumulate_exchange(NodeExchangeAccumImpl& acc,
     if (settings.normal_emission) {
         kernel.flags |= flag_normal_emission;
     }
+    if (acc.derivative_count() > 0) {
+        kernel.flags |= flag_derivatives |
+                        (acc.derivative_count() << derivative_count_shift);
+    }
     kernel.fp_scale = fp_scale;
     kernel.columns = acc.columns();
     kernel.blend_exponent = acc.blend_exponent();
@@ -1172,6 +1186,11 @@ void SceneImpl::accumulate_exchange(NodeExchangeAccumImpl& acc,
         write_storage_descriptor(9, acc.buffer());
         write_storage_descriptor(10, acc.face_columns_buffer());
         write_storage_descriptor(11, acc.face_weights_buffer());
+        const bool derivatives = acc.derivative_count() > 0;
+        write_storage_descriptor(
+            12, derivatives ? acc.groups_buffer() : _dummy_buf.buffer);
+        write_storage_descriptor(
+            13, derivatives ? acc.derivative_buffer() : _dummy_buf.buffer);
     };
 
     if (acc.layout() == AccumLayout::Dense) {

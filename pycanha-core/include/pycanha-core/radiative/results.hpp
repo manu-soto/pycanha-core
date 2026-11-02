@@ -146,12 +146,28 @@ inline constexpr std::int64_t unassigned_column_offset = 3;
 // summed space / inactive / lost columns of its faces' rows, and in the
 // unassigned column what landed on faces in no node (the forward estimate
 // alone, since those faces are not traced).
+//
+// absorptance_derivatives (when the accumulator was given absorptance
+// groups): one matrix per group, laid out as `factors`, holding the
+// derivative of every entry with respect to the band absorptance a (the IR
+// emissivity in the IR band) of all the faces of that group, the
+// reflectance taking a change of a with its specular share kept and the
+// transmittance fixed. Traced with the same rays as `factors` (the score of
+// each path, see exchange.slang): no second trace, no step. The score only
+// sees paths the trace can take: a face whose a is 0 absorbs and emits
+// nothing, and one that reflects nothing (a + t = 1, a black body) sends no
+// reflected path, so what raising a would add there (its first deposits and
+// emission) or lowering it would add (the reflections it would start to make)
+// is not traced. Give a group faces with 0 < a < 1 - t.
+inline constexpr std::int32_t max_absorptance_groups = 4;
+
 struct NodeExchangeResult {
     Band band = Band::IR;
     std::vector<NodeNum> nodes;
     SparseMatrix factors;
     double intra_node_total = 0.0;
     TraceStats stats;
+    std::vector<SparseMatrix> absorptance_derivatives;
 };
 
 // Per-face absorbed power; the solar kernel is O(Nf) and needs no

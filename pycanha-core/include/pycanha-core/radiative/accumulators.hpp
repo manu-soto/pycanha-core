@@ -97,11 +97,18 @@ class ExchangeAccumulator {
 // matrix); keep_full_matrix off. RayDensity weighs the two directions by
 // each face's A / N, which with the same N for every emitter is the ratio of
 // the faces' areas, known before tracing. Vulkan only.
+//
+// absorptance_groups (optional): one per scene face, -1 for none or 0 to
+// max_absorptance_groups - 1. The result then also holds, per group, the
+// derivatives of its factors with respect to the band absorptance of the
+// group's faces (NodeExchangeResult::absorptance_derivatives), traced with
+// the same rays. Dense layout only.
 class NodeExchangeAccumulator {
   public:
-    NodeExchangeAccumulator(const RadiativeScene& scene, Band band,
-                            std::span<const NodeNum> node_numbers,
-                            AccumConfig config = {});
+    NodeExchangeAccumulator(
+        const RadiativeScene& scene, Band band,
+        std::span<const NodeNum> node_numbers, AccumConfig config = {},
+        std::span<const std::int32_t> absorptance_groups = {});
     ~NodeExchangeAccumulator();
     NodeExchangeAccumulator(NodeExchangeAccumulator&&) noexcept;
     NodeExchangeAccumulator& operator=(NodeExchangeAccumulator&&) noexcept;

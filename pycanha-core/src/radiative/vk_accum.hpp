@@ -149,9 +149,10 @@ class ExchangeAccumImpl {
 // into host rows as ExchangeAccumImpl does with face rows.
 class NodeExchangeAccumImpl {
   public:
-    NodeExchangeAccumImpl(SceneImpl& scene, Band band,
-                          std::span<const NodeNum> node_numbers,
-                          const AccumConfig& config);
+    NodeExchangeAccumImpl(
+        SceneImpl& scene, Band band, std::span<const NodeNum> node_numbers,
+        const AccumConfig& config,
+        std::span<const std::int32_t> absorptance_groups = {});
     ~NodeExchangeAccumImpl();
     NodeExchangeAccumImpl(const NodeExchangeAccumImpl&) = delete;
     NodeExchangeAccumImpl& operator=(const NodeExchangeAccumImpl&) = delete;
@@ -186,6 +187,17 @@ class NodeExchangeAccumImpl {
     }
     [[nodiscard]] VkBuffer face_weights_buffer() const noexcept {
         return _face_weights_buf.buffer;
+    }
+    // Absorptance groups (0 when none): the kernel's per-face group and the
+    // derivative cells (count per cell, side by side).
+    [[nodiscard]] std::uint32_t derivative_count() const noexcept {
+        return _derivative_count;
+    }
+    [[nodiscard]] VkBuffer groups_buffer() const noexcept {
+        return _groups_buf.buffer;
+    }
+    [[nodiscard]] VkBuffer derivative_buffer() const noexcept {
+        return _derivative_cells.buffer;
     }
     // A face's node row (num_nodes for a face in no node).
     [[nodiscard]] std::uint32_t row_of(std::uint32_t face) const noexcept {
@@ -238,6 +250,11 @@ class NodeExchangeAccumImpl {
     double _fp_scale = 0.0;
     std::uint64_t _rays_per_face = 0;
     std::uint64_t _total_rays = 0;
+    // Absorptance groups (Dense only).
+    std::uint32_t _derivative_count = 0;
+    GpuBuffer _groups_buf;        // u32 per face, ~0u for no group
+    GpuBuffer _derivative_cells;  // device-local signed u64, count per cell
+    GpuBuffer _derivative_readback;
 };
 
 class SolarAccumImpl {

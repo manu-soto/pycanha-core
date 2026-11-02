@@ -152,7 +152,8 @@ detail::ExchangeAccumImpl& ExchangeAccumulator::impl() noexcept {
 #ifdef __APPLE__
 NodeExchangeAccumulator::NodeExchangeAccumulator(
     const RadiativeScene& /*scene*/, Band /*band*/,
-    std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/) {
+    std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/,
+    std::span<const std::int32_t> /*absorptance_groups*/) {
     throw_no_metal_nodes();
 }
 
@@ -164,9 +165,10 @@ NodeExchangeResult NodeExchangeAccumulator::result() const {
 #else
 NodeExchangeAccumulator::NodeExchangeAccumulator(
     const RadiativeScene& scene, Band band,
-    std::span<const NodeNum> node_numbers, AccumConfig config)
+    std::span<const NodeNum> node_numbers, AccumConfig config,
+    std::span<const std::int32_t> absorptance_groups)
     : _impl(std::make_unique<detail::NodeExchangeAccumImpl>(
-          scene.impl(), band, node_numbers, config)) {}
+          scene.impl(), band, node_numbers, config, absorptance_groups)) {}
 
 void NodeExchangeAccumulator::reset() { _impl->reset(); }
 

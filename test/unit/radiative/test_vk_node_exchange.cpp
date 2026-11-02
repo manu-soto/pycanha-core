@@ -414,3 +414,235 @@ TEST_CASE(
     REQUIRE(csr_bit_identical(result.factors, reference.factors));
     REQUIRE(result.intra_node_total == reference.intra_node_total);
 }
+
+namespace {
+
+// Absorptance derivatives. Two traces with the same seed follow the same
+// paths when no choice along them depends on a: no Russian roulette
+// (energy_threshold 0), and on the faces whose a moves no transmission and a
+// specular share of the reflectance that the shifted rows keep exactly (s = d,
+// in dyadic values, so the kernel's choice is u < 1/2 in all three traces).
+// Their central difference is then the derivative of the very estimator the
+// kernel scores, up to its float rounding and the step's second order.
+// Material 0 (group 0) reflects half specularly, material 2 (group 1) is
+// diffuse, material 1 (no group) also transmits.
+constexpr std::array<std::array<float, 3>, 3> optics = {
+    {{0.5F, 0.25F, 0.0F}, {0.75F, 0.0625F, 0.0625F}, {0.375F, 0.0F, 0.0F}}};
+constexpr std::array<int, 3> material_group = {0, -1, 1};
+constexpr float absorptance_step = 1.0F / 1024.0F;
+
+[[nodiscard]] int optics_material(std::size_t pair_index) {
+    return static_cast<int>(pair_index % 3);
+}
+
+// The rows with material `shifted`'s a moved by `step`, its specular share of
+// the reflectance kept and its transmittance fixed; both bands alike.
+[[nodiscard]] rad::MaterialTable optics_materials(int shifted, float step) {
+    std::array<std::array<float, 6>, 3> rows{};
+    for (std::size_t m = 0; m < rows.size(); ++m) {
+        float a = optics[m][0];
+        float s = optics[m][1];
+        const float t = optics[m][2];
+        if (static_cast<int>(m) == shifted) {
+            const float share = s / (1.0F - a - t);
+            a += step;
+            s = share * (1.0F - a - t);
+        }
+        rows[m] = {a, s, t, a, s, t};
+    }
+    std::vector<int> pair_rows(num_pairs);
+    for (std::size_t index = 0; index < num_pairs; ++index) {
+        pair_rows[index] = optics_material(index);
+    }
+    return make_materials(rows, pair_rows);
+}
+
+[[nodiscard]] std::vector<std::int32_t> material_groups() {
+    std::vector<std::int32_t> groups(num_faces);
+    for (std::uint32_t face = 0; face < num_faces; ++face) {
+        groups[face] =
+            material_group[static_cast<std::size_t>(optics_material(face / 2))];
+    }
+    return groups;
+}
+
+[[nodiscard]] rad::NodeExchangeResult trace_without_roulette(
+    rad::RadiativeScene& scene, std::span<const NodeNum> nodes,
+    std::span<const std::int32_t> groups) {
+    rad::NodeExchangeAccumulator acc(scene, rad::Band::IR, nodes, {}, groups);
+    rad::TraceSettings settings;
+    settings.rays_per_face = 1'000;
+    settings.energy_threshold = 0.0F;
+    for (const std::uint32_t seed : {5U, 6U}) {
+        settings.seed = seed;
+        scene.accumulate_exchange(acc, settings, {});
+    }
+    return acc.result();
+}
+
+}  // namespace
+
+TEST_CASE(
+    "radiative vulkan: absorptance derivatives match a same-seed central "
+    "difference",
+    "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    const std::unique_ptr<pycanha::gmm::GeometryModel> model = make_plates();
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              optics_materials(-1, 0.0F));
+    const std::vector<NodeNum> nodes = node_numbers();
+    const std::vector<std::int32_t> groups = material_groups();
+
+    const rad::NodeExchangeResult central =
+        trace_without_roulette(scene, nodes, groups);
+    REQUIRE(central.absorptance_derivatives.size() == 2);
+    // The groups leave the factors as a trace without them makes them.
+    const rad::NodeExchangeResult plain =
+        trace_without_roulette(scene, nodes, {});
+    REQUIRE(plain.absorptance_derivatives.empty());
+    REQUIRE(csr_bit_identical(central.factors, plain.factors));
+
+    const Eigen::Index rows = central.factors.rows();
+    const Eigen::Index cols = central.factors.cols();
+    for (std::size_t m = 0; m < optics.size(); ++m) {
+        const int group = material_group[m];
+        if (group < 0) {
+            continue;
+        }
+        const auto shifted = static_cast<int>(m);
+        scene.update_materials(optics_materials(shifted, absorptance_step));
+        const rad::NodeExchangeResult up =
+            trace_without_roulette(scene, nodes, {});
+        scene.update_materials(optics_materials(shifted, -absorptance_step));
+        const rad::NodeExchangeResult down =
+            trace_without_roulette(scene, nodes, {});
+        scene.update_materials(optics_materials(-1, 0.0F));
+        // The step as the float rows hold it.
+        const double span =
+            static_cast<double>(optics[m][0] + absorptance_step) -
+            static_cast<double>(optics[m][0] - absorptance_step);
+
+        const rad::SparseMatrix& derivative =
+            central.absorptance_derivatives[static_cast<std::size_t>(group)];
+        REQUIRE(derivative.rows() == rows);
+        REQUIRE(derivative.cols() == cols);
+        std::size_t compared = 0;
+        double largest = 0.0;
+        for (Eigen::Index row = 0; row < rows; ++row) {
+            // The node columns' upper triangle and the buckets.
+            for (Eigen::Index col = row + 1; col < cols; ++col) {
+                const double expected = (csr_value(up.factors, row, col) -
+                                         csr_value(down.factors, row, col)) /
+                                        span;
+                const double actual = csr_value(derivative, row, col);
+                const double value = csr_value(central.factors, row, col);
+                // Float rounding of the deposits and shares, amplified by
+                // a / (2 step), and the step's second order: both well
+                // below 1e-3 of the entry.
+                const double tolerance =
+                    2e-3 * (std::abs(expected) + std::abs(value));
+                if (std::abs(actual - expected) > tolerance) {
+                    INFO("group " << group << ", node " << row << ", column "
+                                  << col << ": " << actual << " against "
+                                  << expected << " (entry " << value << ")");
+                    REQUIRE(std::abs(actual - expected) <= tolerance);
+                }
+                compared += value != 0.0 ? 1 : 0;
+                largest = std::max(largest, std::abs(expected));
+            }
+        }
+        REQUIRE(compared > 1'000);
+        REQUIRE(largest > 0.0);
+    }
+}
+
+TEST_CASE("radiative vulkan: absorptance derivatives add up across groups",
+          "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // Each material's group split in two by face parity (four groups, the
+    // most a trace takes): the halves' derivatives sum to the whole's, ray
+    // for ray, since a path's score is a sum over its faces.
+    const std::unique_ptr<pycanha::gmm::GeometryModel> model = make_plates();
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model->mesh_parts(),
+                              optics_materials(-1, 0.0F));
+    const std::vector<NodeNum> nodes = node_numbers();
+    const std::vector<std::int32_t> whole = material_groups();
+    std::vector<std::int32_t> halves(num_faces);
+    for (std::uint32_t face = 0; face < num_faces; ++face) {
+        halves[face] =
+            whole[face] < 0
+                ? -1
+                : (2 * whole[face]) + static_cast<std::int32_t>(face % 2);
+    }
+    const rad::NodeExchangeResult by_whole =
+        trace_without_roulette(scene, nodes, whole);
+    const rad::NodeExchangeResult by_halves =
+        trace_without_roulette(scene, nodes, halves);
+    REQUIRE(by_halves.absorptance_derivatives.size() ==
+            static_cast<std::size_t>(rad::max_absorptance_groups));
+    REQUIRE(csr_bit_identical(by_whole.factors, by_halves.factors));
+    for (std::size_t group = 0; group < 2; ++group) {
+        const rad::SparseMatrix& sum = by_whole.absorptance_derivatives[group];
+        const rad::SparseMatrix& first =
+            by_halves.absorptance_derivatives[2 * group];
+        const rad::SparseMatrix& second =
+            by_halves.absorptance_derivatives[(2 * group) + 1];
+        REQUIRE(sum.nonZeros() > 0);
+        for (Eigen::Index row = 0; row < sum.rows(); ++row) {
+            for (Eigen::Index col = row + 1; col < sum.cols(); ++col) {
+                const double expected = csr_value(sum, row, col);
+                const double parts =
+                    csr_value(first, row, col) + csr_value(second, row, col);
+                const double scale = std::abs(csr_value(first, row, col)) +
+                                     std::abs(csr_value(second, row, col)) +
+                                     std::abs(expected);
+                INFO("group " << group << ", node " << row << ", column " << col
+                              << ": " << parts << " against " << expected);
+                REQUIRE(std::abs(parts - expected) <= (1e-5 * scale) + 1e-18);
+            }
+        }
+    }
+}
+
+TEST_CASE("radiative vulkan: absorptance groups refuse what they cannot trace",
+          "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    Bench bench;
+    const auto make = [&](std::span<const std::int32_t> groups,
+                          const rad::AccumConfig& config) {
+        return rad::NodeExchangeAccumulator(bench.scene, rad::Band::IR,
+                                            bench.nodes, config, groups);
+    };
+    std::vector<std::int32_t> groups(num_faces, -1);
+    groups[0] = 0;
+    REQUIRE_NOTHROW(make(groups, {}));
+    const std::vector<std::int32_t> short_groups(num_faces - 1, 0);
+    REQUIRE_THROWS_AS(make(short_groups, {}), std::invalid_argument);
+    groups[1] = rad::max_absorptance_groups;
+    REQUIRE_THROWS_AS(make(groups, {}), std::invalid_argument);
+    groups[1] = -2;
+    REQUIRE_THROWS_AS(make(groups, {}), std::invalid_argument);
+    groups[1] = 1;
+    rad::AccumConfig tiled;
+    tiled.layout = rad::AccumLayout::Tiled;
+    tiled.tile_rows = 50;
+    REQUIRE_THROWS_AS(make(groups, tiled), std::invalid_argument);
+    // No face in a group: nothing to trace, any layout.
+    const std::vector<std::int32_t> none(num_faces, -1);
+    rad::NodeExchangeAccumulator acc = make(none, tiled);
+    rad::TraceSettings settings;
+    settings.rays_per_face = 100;
+    bench.scene.accumulate_exchange(acc, settings, {});
+    REQUIRE(acc.result().absorptance_derivatives.empty());
+}
