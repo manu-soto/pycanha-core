@@ -10,6 +10,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "exchange_assemble.hpp"
@@ -301,12 +302,42 @@ std::uint64_t ExchangeAccumImpl::conservation_error() const {
 
 NodeExchangeAccumImpl::NodeExchangeAccumImpl(
     SceneImpl& scene, Band band, std::span<const NodeNum> node_numbers,
-    const AccumConfig& config)
+    const AccumConfig& config, std::span<const std::int32_t> absorptance_groups)
     : _scene(scene), _band(band), _config(config) {
     const std::size_t faces = _scene.num_faces();
     if (node_numbers.size() != faces) {
         throw std::invalid_argument(
             "pycanha::radiative: node_numbers size must match the face count");
+    }
+    std::vector<std::uint32_t> groups;
+    if (!absorptance_groups.empty()) {
+        if (absorptance_groups.size() != faces) {
+            throw std::invalid_argument(
+                "pycanha::radiative: absorptance_groups size must match the "
+                "face count");
+        }
+        groups.assign(faces, std::numeric_limits<std::uint32_t>::max());
+        std::int32_t largest = -1;
+        for (std::size_t face = 0; face < faces; ++face) {
+            const std::int32_t group = absorptance_groups[face];
+            if (group < -1 ||
+                group >= static_cast<std::int32_t>(max_absorptance_groups)) {
+                throw std::invalid_argument(
+                    "pycanha::radiative: an absorptance group is -1 (none) or "
+                    "0 to " +
+                    std::to_string(max_absorptance_groups - 1));
+            }
+            if (group >= 0) {
+                groups[face] = static_cast<std::uint32_t>(group);
+                largest = std::max(largest, group);
+            }
+        }
+        _derivative_count = static_cast<std::uint32_t>(largest + 1);
+        if (_derivative_count > 0 && config.layout != AccumLayout::Dense) {
+            throw std::invalid_argument(
+                "pycanha::radiative: absorptance derivatives need the Dense "
+                "layout");
+        }
     }
     const TriangulationConfig& tri = _config.triangulation;
     if (tri.mode == TriangulationMode::ConstrainedLeastSquares) {
@@ -382,6 +413,17 @@ NodeExchangeAccumImpl::NodeExchangeAccumImpl(
         std::max<VkDeviceSize>(faces * 4 * sizeof(float), 16), accum_usage,
         BufferMemory::DeviceLocal);
     _scene.clear_buffer(_face_weights_buf);
+    if (_derivative_count > 0) {
+        const VkDeviceSize derivative_bytes = cell_bytes * _derivative_count;
+        check_storage_range(_scene, derivative_bytes);
+        _groups_buf = _scene.upload_to_new_buffer(
+            groups.data(), faces * sizeof(std::uint32_t),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        _derivative_cells = _scene.create_buffer(derivative_bytes, accum_usage,
+                                                 BufferMemory::DeviceLocal);
+        _derivative_readback = _scene.create_buffer(
+            derivative_bytes, readback_usage, BufferMemory::HostReadback);
+    }
     reset();
 }
 
@@ -390,6 +432,9 @@ NodeExchangeAccumImpl::~NodeExchangeAccumImpl() {
     _scene.destroy_buffer(_readback);
     _scene.destroy_buffer(_face_columns_buf);
     _scene.destroy_buffer(_face_weights_buf);
+    _scene.destroy_buffer(_groups_buf);
+    _scene.destroy_buffer(_derivative_cells);
+    _scene.destroy_buffer(_derivative_readback);
 }
 
 void NodeExchangeAccumImpl::reset() {
@@ -406,6 +451,9 @@ void NodeExchangeAccumImpl::reset() {
 
 void NodeExchangeAccumImpl::clear_block_scratch() {
     _scene.clear_buffer(_cells);
+    if (_derivative_count > 0) {
+        _scene.clear_buffer(_derivative_cells);
+    }
 }
 
 std::vector<std::uint32_t> NodeExchangeAccumImpl::prepare_emitters(
@@ -556,6 +604,42 @@ NodeExchangeResult NodeExchangeAccumImpl::build_result() const {
     result.nodes = _nodes;
     result.stats.total_rays = _total_rays;
     result.stats.rays_per_face = _rays_per_face;
+    if (_derivative_count > 0 && nodes > 0) {
+        // Each group's cells out of the side-by-side buffer, assembled as the
+        // factors are (signed, 1024 deposit units a cell unit), every entry
+        // kept: a derivative has no threshold of its own.
+        _scene.read_back(_derivative_cells, _derivative_readback);
+        const std::span<const std::uint64_t> all(
+            static_cast<const std::uint64_t*>(
+                checked_mapped(_derivative_readback)),
+            nodes * cols * _derivative_count);
+        AccumConfig exact = _config;
+        exact.sparse_threshold = 0.0;
+        std::vector<std::uint64_t> group_cells(nodes * cols);
+        for (std::uint32_t group = 0; group < _derivative_count; ++group) {
+            for (std::size_t cell = 0; cell < group_cells.size(); ++cell) {
+                group_cells[cell] = all[(cell * _derivative_count) + group];
+            }
+            NodeExchangeResult derivative = assemble_node_exchange(
+                NodeExchangeInputs{
+                    .cells = std::span<const std::uint64_t>(group_cells),
+                    .num_nodes = nodes,
+                    .node_scale = _node_scale,
+                    .node_emissive_area = _node_emissive_area,
+                    .rays_per_face = _rays_per_face,
+                    .emitted_area = _emitted_area,
+                    .fp_scale = _fp_scale,
+                    .band = _band,
+                    .signed_cells = true,
+                    .cell_multiplier = derivative_cell_multiplier},
+                exact);
+            result.absorptance_derivatives.push_back(
+                std::move(derivative.factors));
+        }
+    } else if (_derivative_count > 0) {
+        result.absorptance_derivatives.assign(
+            _derivative_count, SparseMatrix(0, num_node_virtual_columns));
+    }
     return result;
 }
 

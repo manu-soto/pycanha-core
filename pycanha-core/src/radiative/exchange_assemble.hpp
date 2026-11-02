@@ -87,7 +87,15 @@ struct NodeExchangeInputs {
     double emitted_area = 0.0;
     double fp_scale = 0.0;
     Band band = Band::IR;
+    // Absorptance derivatives: every cell is a signed (two's complement)
+    // value, worth cell_multiplier fixed-point units of a deposit.
+    bool signed_cells = false;
+    double cell_multiplier = 1.0;
 };
+
+// What one unit of a derivative cell is worth in deposit units (the
+// kernel's DERIVATIVE_UNIT, exchange.slang).
+inline constexpr double derivative_cell_multiplier = 1024.0;
 
 // `nodes`, total_rays and rays_per_face are filled in by the caller. The
 // lost-energy fraction is the lost H over the emitted A eps (the face result
