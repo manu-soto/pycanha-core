@@ -364,3 +364,34 @@ TEST_CASE("SteadyState jacobian needs a converged solve and a parameter",
             "unused"));
     REQUIRE_THROWS_AS(solver.jacobian(), std::invalid_argument);
 }
+
+TEST_CASE("SteadyState jacobian and linear response take zero columns",
+          "[solver][steady][jacobian]") {
+    // A parameter that does not enter a steady state (a capacity) has a zero
+    // column, and a load case may be zero: with reuse_factors, PARDISO's
+    // iteration on the factors fails on a zero right-hand side.
+    const auto model = make_parametric_radiative_model();
+    model->parameters().add_parameter("c", 2.0e5);
+    static_cast<void>(model->formulas().add_parameter_formula("C10", "c"));
+    model->formulas().parameters_with_derivatives().add_parameter("c");
+    model->formulas().apply_formulas();
+    const auto nd = model->nodes().get_num_diff_nodes();
+    const auto row_15 = *model->nodes().get_idx_from_node_num(15);
+
+    for (const auto& configuration : configurations(/*radiation=*/true)) {
+        INFO(configuration.name);
+        SteadyState solver(model);
+        configure(solver, configuration.settings);
+        solver.initialize();
+        solve(solver, model, 250.0);
+        const Eigen::MatrixXd jacobian = solver.jacobian();
+        REQUIRE(jacobian.col(jacobian.cols() - 1).isZero(0.0));
+        REQUIRE_FALSE(jacobian.col(3).isZero(0.0));
+        Eigen::MatrixXd heat = Eigen::MatrixXd::Zero(nd, 2);
+        heat(row_15, 1) = 1.0;
+        const Eigen::MatrixXd response = solver.linear_response(heat);
+        REQUIRE(response.col(0).isZero(0.0));
+        REQUIRE((response.col(1) - jacobian.col(3)).cwiseAbs().maxCoeff() <
+                1e-9 * jacobian.col(3).cwiseAbs().maxCoeff());
+    }
+}
