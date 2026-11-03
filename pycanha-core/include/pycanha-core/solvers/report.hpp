@@ -94,6 +94,14 @@ struct SolverReport {
     std::vector<NonConvergedStep> nonconverged;
     /// Largest change of the last iteration [K].
     double max_dT = 0.0;
+    /// Estimated error the iteration on old factors leaves in the
+    /// temperatures [K]: reuse_tolerance times the largest change of the last
+    /// iteration of the steady state, or of any time step; 0 without
+    /// reuse_factors. An order of magnitude, not a bound: LAPACK's FGMRES,
+    /// which stops on the residual without the factors, and long transients,
+    /// where it adds up over the steps, can leave a few times more. Rounding
+    /// errors, the same as a direct solve's, come on top.
+    double reuse_error = 0.0;
 
     /// Numerical factorizations.
     int factorizations = 0;

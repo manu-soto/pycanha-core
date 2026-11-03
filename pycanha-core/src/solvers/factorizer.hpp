@@ -101,6 +101,10 @@ struct IparmEntry {
 /// form, 1 (structurally symmetric) otherwise.
 [[nodiscard]] int pardiso_matrix_type(bool symmetric) noexcept;
 
+/// L of iparm[3] for a reuse tolerance: the decade 1e-L at or below it, from
+/// 1 to 15.
+[[nodiscard]] int reuse_digits(double reuse_tolerance) noexcept;
+
 /// iparm[3] = 10 * L + K stops the iteration on the previous factors at a
 /// relative residual of 10^-L, with CGS (K = 1) for the unsymmetric types
 /// or CG (K = 2) for the symmetric positive definite one. K is corrected to

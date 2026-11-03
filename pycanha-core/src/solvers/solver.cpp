@@ -354,6 +354,7 @@ void Solver::record_steady_iterations(int iterations, bool converged) {
     _report.iterations = iterations;
     _report.max_step_iterations = iterations;
     _report.max_dT = max_dT;
+    record_reuse_error();
     if (!converged) {
         record_nonconverged(0, 0.0, iterations);
     }
@@ -366,9 +367,19 @@ void Solver::record_step_iterations(int step, double time, int iterations,
     _report.max_step_iterations =
         std::max(_report.max_step_iterations, iterations);
     _report.max_dT = max_dT;
+    record_reuse_error();
     if (!converged) {
         // The report counts time steps from 1.
         record_nonconverged(step + 1, time, iterations);
+    }
+}
+
+// The iteration on old factors stops at a relative residual of
+// reuse_tolerance, which stays in the last change of each loop.
+void Solver::record_reuse_error() noexcept {
+    if (_resolved.reuse_factors) {
+        _report.reuse_error =
+            std::max(_report.reuse_error, _resolved.reuse_tolerance * max_dT);
     }
 }
 

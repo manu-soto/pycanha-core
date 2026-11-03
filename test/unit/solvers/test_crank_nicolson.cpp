@@ -1,3 +1,4 @@
+#include <Eigen/Core>
 #include <algorithm>
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -19,6 +20,7 @@
 #include "pycanha-core/thermaldata/thermaldata.hpp"
 #include "pycanha-core/tmm/node.hpp"
 #include "pycanha-core/tmm/thermalmathematicalmodel.hpp"
+#include "solver_test_models.hpp"
 
 namespace {
 
@@ -226,6 +228,7 @@ using pycanha::solvers::PardisoOrdering;
 using pycanha::solvers::Settings;
 using pycanha::solvers::Storage;
 using pycanha::solvers::transient::CrankNicolson;
+namespace models = pycanha::test_models;
 
 // The reference run: 100 000 s in steps of 1000 s, an output every 10 000 s.
 void configure(CrankNicolson& solver, Settings settings) {
@@ -240,6 +243,30 @@ void reset_model_temps(pycanha::ThermalMathematicalModel& model) {
     model.nodes().set_T(15, init_temp);
     model.nodes().set_T(20, init_temp);
     model.nodes().set_T(25, init_temp);
+}
+
+// The temperatures after 20 steps of 5 s on a radiative plate.
+Eigen::VectorXd plate_transient(Settings settings) {
+    const auto model = models::make_plate(20, /*radiation=*/true);
+    settings.max_iterations = 50;
+    settings.tolerance = 1e-10;
+    CrankNicolson solver(model);
+    solver.set_settings(settings);
+    solver.set_simulation_time(0.0, 100.0, 5.0, 100.0);
+    solver.initialize();
+    solver.solve();
+    REQUIRE(solver.converged());
+    return models::temperatures(model);
+}
+
+// The same transient reusing factors with a loose relative residual: its
+// largest difference with a direct solve.
+double loose_reuse_difference(double reuse_tolerance,
+                              const Eigen::VectorXd& reference) {
+    Settings settings;
+    settings.reuse_factors = true;
+    settings.reuse_tolerance = reuse_tolerance;
+    return models::max_difference(plate_transient(settings), reference);
 }
 
 }  // namespace
@@ -342,6 +369,19 @@ TEST_CASE("CrankNicolson with Eigen AMD gives the same transient",
     solver.initialize();
     solver.solve();
     REQUIRE(compare_temps(*model, false));
+}
+
+TEST_CASE(
+    "CrankNicolson reusing factors keeps a direct solve's answer at a "
+    "loose iterative step",
+    "[solver][transient][reuse]") {
+    if (!pycanha::MKL_ENABLED) {
+        SKIP("MKL not built");
+    }
+    // A relative residual of 1e-1 (iparm[3] = 11) stays in each change,
+    // which shrinks as the inner iterations converge.
+    const Eigen::VectorXd reference = plate_transient(Settings{});
+    REQUIRE(loose_reuse_difference(1e-1, reference) < 1e-7);
 }
 
 TEST_CASE("CrankNicolson refuses unavailable configurations",

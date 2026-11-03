@@ -286,6 +286,7 @@ void CrankNicolson::prepare(bool log_warnings) {
     _capacity_diagonal = VectorXd::Zero(nd);
     _radiation_linear_term = VectorXd::Zero(nd);
     _kt_q_n0 = VectorXd::Zero(nd);
+    _a_times_t = VectorXd::Zero(nd);
     _ones_domain = VectorXd::Ones(nd);
     _ones_boundary = VectorXd::Ones(nb);
     _t3_domain = VectorXd::Zero(nd);
@@ -307,12 +308,13 @@ SolverMemory CrankNicolson::memory_now() const {
         memory.exact = _network->factor_bytes_exact();
         memory.matrix = _network->matrix_bytes();
     }
-    memory.matrix +=
-        bytes_of(_rhs) + bytes_of(_heat_flux_n0) + bytes_of(_capacities) +
-        bytes_of(_capacities_inverse) + bytes_of(_capacity_diagonal) +
-        bytes_of(_t3_domain) + bytes_of(_t4_domain) + bytes_of(_t4_boundary) +
-        bytes_of(_radiation_linear_term) + bytes_of(_kt_q_n0) +
-        bytes_of(_ones_domain) + bytes_of(_ones_boundary) + common_bytes();
+    memory.matrix += bytes_of(_rhs) + bytes_of(_heat_flux_n0) +
+                     bytes_of(_capacities) + bytes_of(_capacities_inverse) +
+                     bytes_of(_capacity_diagonal) + bytes_of(_t3_domain) +
+                     bytes_of(_t4_domain) + bytes_of(_t4_boundary) +
+                     bytes_of(_radiation_linear_term) + bytes_of(_kt_q_n0) +
+                     bytes_of(_a_times_t) + bytes_of(_ones_domain) +
+                     bytes_of(_ones_boundary) + common_bytes();
     memory.output = output_bytes();
     return memory;
 }
@@ -545,6 +547,21 @@ void CrankNicolson::store_heat_flux_at_n0() {
 void CrankNicolson::solve_step() {
     PYCANHA_PROFILE_SCOPE("Solver Step");
     _rhs = Qd + _heat_flux_n0;
+    if (_resolved.reuse_factors) {
+        // Solved for the change from the last inner iteration: the residual
+        // of an iteration on old factors then stays in a change that shrinks
+        // as the step converges. It starts from zero, closer to this change
+        // than the last one is.
+        _network->multiply(Td, _a_times_t);
+        _rhs -= _a_times_t;
+        Td_solver.setZero();
+        if (_rhs.isZero(0.0)) {
+            // A zero residual is solved by a zero change, and PARDISO's
+            // iteration on old factors fails on a zero right-hand side.
+            Td_solver = Td;
+            return;
+        }
+    }
 
     // The network holds -K + 2C/dt, with a positive diagonal.
     const auto start = Clock::now();
@@ -552,6 +569,9 @@ void CrankNicolson::solve_step() {
     if (!outcome.succeeded) {
         throw std::runtime_error(std::string(name()) + ": solve failed (" +
                                  _network->error_message() + ")");
+    }
+    if (_resolved.reuse_factors) {
+        Td_solver += Td;
     }
     record_linear_solve(start, outcome.factorized);
 }

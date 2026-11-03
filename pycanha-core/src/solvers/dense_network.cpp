@@ -254,14 +254,15 @@ constexpr auto double_bytes = static_cast<std::int64_t>(sizeof(double));
 
 // FGMRES (MKL's reverse-communication solver) preconditioned with the factors
 // of an earlier matrix: the dense counterpart of PARDISO's iteration on
-// previous factors. It stops at a relative residual of `tolerance` against
-// the initial one, so it never accepts the initial guess unchecked.
+// previous factors. It stops at a relative residual of `tolerance`
+// (reuse_tolerance) against the initial one, so it never accepts the initial
+// guess unchecked.
 class FactorReuse {
   public:
     static constexpr MKL_INT max_iterations = 20;
-    static constexpr double tolerance = 1e-6;
 
     void allocate(Index size) { _work.resize(to_sizet(work_size(size))); }
+    void set_tolerance(double tolerance) noexcept { _tolerance = tolerance; }
 
     [[nodiscard]] static std::int64_t bytes(Index size) noexcept {
         return work_size(size) * double_bytes;
@@ -287,7 +288,7 @@ class FactorReuse {
         _ipar[preconditioned] = 1;
         _ipar[zero_norm_test] = 1;
         _ipar[restart] = max_iterations;
-        _dpar[relative_tolerance] = tolerance;
+        _dpar[relative_tolerance] = _tolerance;
         dfgmres_check(&size, x.data(), b.data(), &request, _ipar.data(),
                       _dpar.data(), work.data());
         if (request == check_failed) {
@@ -348,6 +349,7 @@ class FactorReuse {
     }
 
     std::vector<double> _work;
+    double _tolerance = 0.0;
     std::array<MKL_INT, 128> _ipar{};
     std::array<double, 128> _dpar{};
 };
@@ -387,6 +389,9 @@ class DenseNetwork final : public LinearizedNetwork {
           _reuse(settings.reuse_factors),
           _factors(make_factors(settings, options.symmetric)),
           _assembly(make_dense_assembly(couplings, options)) {
+#if PYCANHA_USE_MKL
+        _factor_reuse.set_tolerance(settings.reuse_tolerance);
+#endif
         apply_live_settings(settings);
     }
 

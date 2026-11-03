@@ -284,6 +284,7 @@ class Solver {
     void prepare_formulas_for_execution();
     void release_formulas_after_execution() noexcept;
     void record_nonconverged(int step, double time, int iterations);
+    void record_reuse_error() noexcept;
     [[nodiscard]] SolverMemory estimate_memory_quietly();
     [[nodiscard]] std::string_view auto_reason(std::string_view name) const;
 

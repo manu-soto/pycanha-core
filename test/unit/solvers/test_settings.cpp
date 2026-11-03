@@ -130,6 +130,7 @@ Settings fully_set() {
     settings.backend = Backend::EIGEN;
     settings.factorization = Factorization::LU;
     settings.reuse_factors = true;
+    settings.reuse_tolerance = 1e-3;
     settings.fixed_couplings = true;
     settings.threads = 4;
     settings.start_time = 10.0;
@@ -237,6 +238,21 @@ TEST_CASE("Factor reuse selects a stall-safe one-level factorization",
     REQUIRE(resolved.pardiso.ordering == PardisoOrdering::MIN_DEGREE);
     REQUIRE(resolved.origin("pardiso.level") == Origin::DEFAULT);
     REQUIRE(resolved.warnings.empty());
+}
+
+TEST_CASE("reuse_tolerance applies only with factor reuse",
+          "[solver][settings]") {
+    Settings settings;
+    REQUIRE_FALSE(
+        solvers::resolve(settings, steady()).applies("reuse_tolerance"));
+    settings.reuse_factors = true;
+    const ResolvedSettings resolved = solvers::resolve(settings, steady());
+    REQUIRE(resolved.applies("reuse_tolerance"));
+    REQUIRE(resolved.reuse_tolerance == Catch::Approx(1e-2));
+    REQUIRE_THROWS_AS(settings.set("reuse_tolerance", SettingValue{1.0}),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(settings.set("reuse_tolerance", SettingValue{0.0}),
+                      std::invalid_argument);
 }
 
 TEST_CASE("An iterating iparm[3] selects the one-level factorization",

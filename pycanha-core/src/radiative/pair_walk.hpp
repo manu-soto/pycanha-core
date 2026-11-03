@@ -270,6 +270,16 @@ class Weighting {
     WeightTable _table;
 };
 
+// The u = A_i/N_i each face's weight reads (TriangulationConfig::area_weights):
+// A_i over the rays face i emitted, or A_i over the mean of the emitting
+// faces' rays. Zero where the face emitted nothing, as the gate on the
+// actual ratio expects. Ratios only matter relative to each other, but the
+// mean is taken exactly so that a uniform trace gets the same doubles either
+// way, bit for bit.
+[[nodiscard]] std::vector<double> weight_ratios(
+    std::span<const double> areas, std::span<const std::uint64_t> rays_per_row,
+    bool area_weights);
+
 using pycanha::utils::parallel_for_index;
 
 // Threading a small matrix costs more than the pass itself, so the automatic

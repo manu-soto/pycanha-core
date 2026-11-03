@@ -145,6 +145,23 @@ inline Model make_floating_model(bool radiation) {
     return model;
 }
 
+// One diffusive node conductively coupled to a boundary node 50 K warmer:
+// one iteration reaches the boundary temperature exactly, so the next one
+// has a zero residual.
+inline Model make_settling_model() {
+    auto model = std::make_shared<ThermalMathematicalModel>("settling");
+    Node node(1);
+    node.set_T(250.0);
+    node.set_C(1.0);
+    model->add_node(node);
+    Node sink(9);
+    sink.set_type(BOUNDARY_NODE);
+    sink.set_T(300.0);
+    model->add_node(sink);
+    model->add_conductive_coupling(1, 9, 1.0);
+    return model;
+}
+
 inline Eigen::VectorXd temperatures(const Model& model) {
     const auto& values = model->nodes().T_vector;
     return Eigen::Map<const Eigen::VectorXd>(values.data(),

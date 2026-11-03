@@ -76,6 +76,20 @@ struct TriangulationConfig {
     // the combined upper triangle. Off at every model size: it doubles the
     // result memory and exists only for someone debugging a model.
     bool keep_full_matrix = false;
+    // RayDensity only: what N_i the weight's u = A_i/N_i reads. false: the
+    // rays face i actually emitted, the minimum-variance weight for the
+    // allocation that was traced. true: the mean over the emitting faces, so
+    // the weight follows the areas alone, as a uniform trace sets it.
+    //
+    // The combined value's expectation is the weighted mean of the two
+    // directions' expectations. Where those differ (faces that touch or
+    // overlap, a ray origin offset that leaks), actual-count weights move it
+    // whenever the rays are allocated other than uniformly (more rays to
+    // some faces, fewer to others) and the result then depends on the
+    // allocation. With area weights an uneven allocation changes only the
+    // noise. On a uniform trace both settings give the same weights, bit for
+    // bit. ConstrainedLeastSquares ignores it.
+    bool area_weights = false;
 };
 
 struct AccumConfig {

@@ -24,6 +24,8 @@ using pycanha::solvers::transient::CrankNicolson;
 namespace models = pycanha::test_models;
 
 constexpr int plate_size = 4;
+// The tolerance of the factor reuse report test [K].
+constexpr double reuse_tolerance_check = 1e-6;
 constexpr double time_step = 10.0;
 
 // A radiative plate whose iterations can never meet the tolerance.
@@ -219,6 +221,31 @@ TEST_CASE("The report prints and converts to a dict", "[solver][report]") {
     REQUIRE(std::get<std::string>(dict.at("status")) == "NOT_CONVERGED");
 }
 
+TEST_CASE("The report estimates the error of factor reuse",
+          "[solver][report]") {
+    if (!pycanha::MKL_ENABLED) {
+        SKIP("MKL not built");
+    }
+    const auto model = models::make_plate(plate_size, /*radiation=*/true);
+    const auto solve_with = [&model](bool reuse) {
+        models::reset_temperatures(model, 250.0);
+        SteadyState solver(model);
+        Settings settings;
+        settings.reuse_factors = reuse;
+        settings.tolerance = reuse_tolerance_check;
+        solver.set_settings(settings);
+        solver.initialize();
+        solver.solve();
+        return solver.report();
+    };
+    const SolverReport reuse = solve_with(true);
+    // reuse_tolerance (1e-2) times a last change below the tolerance.
+    REQUIRE(reuse.reuse_error > 0.0);
+    REQUIRE(reuse.reuse_error <= 1e-2 * reuse_tolerance_check);
+    REQUIRE(has_text(reuse.to_string(), "reuse error"));
+    REQUIRE(solve_with(false).reuse_error == 0.0);
+}
+
 TEST_CASE("explain() gives every value with its origin and reason",
           "[solver][explain]") {
     const auto model = models::make_plate(plate_size, /*radiation=*/true);
@@ -248,8 +275,25 @@ TEST_CASE("explain() shows the PARDISO iparm entries of factor reuse",
 
     REQUIRE(has_text(text, "reuse_factors needs the one-level factorization"));
     REQUIRE(has_text(text, "iparm[3]"));
-    REQUIRE(has_text(text, "61"));
+    REQUIRE(has_text(text, "relative residual of 1e-2"));
     REQUIRE(has_text(text, "minimum degree ordering"));
+}
+
+TEST_CASE("explain() shows the iparm[3] decade of reuse_tolerance",
+          "[solver][explain]") {
+    if (!pycanha::MKL_ENABLED) {
+        SKIP("MKL not built");
+    }
+    // 3e-3 stops at the decade below it: 1e-3, iparm[3] = 31.
+    const auto model = models::make_plate(plate_size, /*radiation=*/true);
+    Settings settings;
+    settings.reuse_factors = true;
+    settings.reuse_tolerance = 3e-3;
+    auto solver = plate_transient(model, settings, 1);
+    const std::string text = solver->explain();
+
+    REQUIRE(has_text(text, "31"));
+    REQUIRE(has_text(text, "relative residual of 1e-3"));
 }
 
 TEST_CASE("explain() lists contradictions and ignored settings",

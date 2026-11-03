@@ -4,6 +4,7 @@
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -322,6 +323,20 @@ std::string describe(const ResolvedSettings& settings, bool symmetric) {
 
 int pardiso_matrix_type(bool symmetric) noexcept { return symmetric ? 2 : 1; }
 
+int reuse_digits(double reuse_tolerance) noexcept {
+    // The decade at or below the tolerance; the margin keeps 1e-4 at 4
+    // despite its rounding.
+    constexpr double margin = 1e-9;
+    constexpr int fewest = 1;
+    constexpr int most = 15;
+    if (reuse_tolerance <= 0.0) {
+        return most;
+    }
+    const auto digits =
+        static_cast<int>(std::ceil(-std::log10(reuse_tolerance) - margin));
+    return std::clamp(digits, fewest, most);
+}
+
 int pardiso_iterative_control(int iparm_3, bool symmetric) noexcept {
     constexpr int decimal = 10;
     const int method = iparm_3 % decimal;
@@ -334,9 +349,6 @@ int pardiso_iterative_control(int iparm_3, bool symmetric) noexcept {
 
 std::vector<IparmEntry> pardiso_iparm(const ResolvedSettings& settings,
                                       bool symmetric) {
-    // iparm[3] = 61: iterate on the previous factors (CGS, or CG for
-    // Cholesky) down to a relative residual of 1e-6 before refactorizing.
-    constexpr int reuse_iterative_step = 61;
     constexpr int parallel_nested_dissection = 3;
     constexpr int minimum_degree = 0;
 
@@ -349,13 +361,20 @@ std::vector<IparmEntry> pardiso_iparm(const ResolvedSettings& settings,
         .value = min_degree ? minimum_degree : parallel_nested_dissection,
         .meaning = min_degree ? "minimum degree ordering"
                               : "parallel nested dissection ordering"};
+    // iparm[3] = 10 L + 1: iterate on the previous factors (CGS, or CG for
+    // Cholesky) down to a relative residual of 1e-L before refactorizing.
+    const int digits = reuse_digits(settings.reuse_tolerance);
+    constexpr int decimal = 10;
     entries[iparm_iterative] = {
         .index = iparm_iterative,
-        .value = pardiso_iterative_control(
-            settings.reuse_factors ? reuse_iterative_step : 0, symmetric),
+        .value = settings.reuse_factors ? pardiso_iterative_control(
+                                              (decimal * digits) + 1, symmetric)
+                                        : 0,
         .meaning = settings.reuse_factors
-                       ? "iterate on the previous factors down to a relative "
-                         "residual of 1e-6 (reuse_factors)"
+                       ? std::format("iterate on the previous factors down "
+                                     "to a relative residual of 1e-{} "
+                                     "(reuse_tolerance)",
+                                     digits)
                        : "no iteration on the previous factors"};
     entries[iparm_two_level] = {.index = iparm_two_level,
                                 .value = two_level ? 1 : 0,

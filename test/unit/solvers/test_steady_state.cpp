@@ -183,6 +183,33 @@ Eigen::VectorXd solve_reference(const Model& model, double tolerance) {
     return models::temperatures(model);
 }
 
+struct LooseReuse {
+    bool converged = false;
+    int factorizations = 0;
+    double difference = 0.0;
+};
+
+// Factor reuse stopping at a loose relative residual, compared with a direct
+// solve.
+LooseReuse solve_loose_reuse(double reuse_tolerance) {
+    constexpr double tolerance = 1e-9;
+    const auto model = models::make_plate(20, /*radiation=*/true);
+    const auto reference = solve_reference(model, tolerance);
+
+    models::reset_temperatures(model, 250.0);
+    SteadyState solver(model);
+    Settings settings;
+    settings.reuse_factors = true;
+    settings.reuse_tolerance = reuse_tolerance;
+    configure(solver, settings, tolerance);
+    solver.initialize();
+    solver.solve();
+    return {.converged = solver.converged(),
+            .factorizations = solver.num_factorizations(),
+            .difference =
+                models::max_difference(models::temperatures(model), reference)};
+}
+
 }  // namespace
 
 TEST_CASE("SteadyState solves a simple model", "[solver][steady]") {
@@ -540,6 +567,38 @@ TEST_CASE("Factor reuse matches a direct solve on a radiative plate",
     REQUIRE(models::max_difference(models::temperatures(model), reference) <
             1e-6);
     // One factorization, the other iterations iterate on it.
+    REQUIRE(solver.num_factorizations() == 1);
+}
+
+TEST_CASE(
+    "Factor reuse keeps a direct solve's answer at a loose iterative "
+    "step",
+    "[solver][steady][reuse]") {
+    if (!pycanha::MKL_ENABLED) {
+        SKIP("MKL not built");
+    }
+    // A relative residual of 1e-1 (iparm[3] = 11) stays in each change, which
+    // shrinks with every iteration, and every iteration after the first
+    // still reuses the factors.
+    const LooseReuse loose = solve_loose_reuse(1e-1);
+    REQUIRE(loose.converged);
+    REQUIRE(loose.factorizations == 1);
+    REQUIRE(loose.difference < 1e-7);
+}
+
+TEST_CASE("Factor reuse stops on a zero residual", "[solver][steady][reuse]") {
+    if (!pycanha::MKL_ENABLED) {
+        SKIP("MKL not built");
+    }
+    const auto model = models::make_settling_model();
+    SteadyState solver(model);
+    Settings settings;
+    settings.reuse_factors = true;
+    configure(solver, settings, 1e-6);
+    solver.initialize();
+    solver.solve();
+    REQUIRE(solver.converged());
+    REQUIRE(solver.iterations() == 2);
     REQUIRE(solver.num_factorizations() == 1);
 }
 

@@ -154,10 +154,12 @@ void scan_rows(const Cells& cells, const ScanInputs& in, const ScanOutputs& out,
 class VfEmit {
   public:
     VfEmit(std::span<const double> areas, std::span<const double> ratio,
-           const Weighting& weighting, double threshold,
-           std::span<RowEntries> rows, std::span<double> residual)
+           std::span<const double> weight, const Weighting& weighting,
+           double threshold, std::span<RowEntries> rows,
+           std::span<double> residual)
         : _areas(areas),
           _ratio(ratio),
+          _weight(weight),
           _weighting(&weighting),
           _threshold(threshold),
           _project(weighting.mode() ==
@@ -182,9 +184,11 @@ class VfEmit {
             _rows[row].push(column, blue.value, blue.variance);
             return;
         }
+        // The weight reads `_weight`, which is zero exactly where `_ratio`
+        // is (weight_ratios), so the gates in combine_pair do not change.
         const double value =
-            combine_pair(forward_value, backward_value, _ratio[row],
-                         _ratio[column], *_weighting);
+            combine_pair(forward_value, backward_value, _weight[row],
+                         _weight[column], *_weighting);
         if (keep_pair(value, _areas[row], _areas[column], _threshold)) {
             _rows[row].push(column, value);
         }
@@ -220,6 +224,7 @@ class VfEmit {
 
     std::span<const double> _areas;
     std::span<const double> _ratio;
+    std::span<const double> _weight;
     const Weighting* _weighting;
     double _threshold;
     bool _project;
@@ -309,8 +314,10 @@ VfResult assemble_vf(CountSource counts, std::span<const double> areas,
         .row_sums = std::span<double>(result.row_sums.data(), faces),
         .stats = row_stats,
         .full_rows = full_rows};
-    const VfEmit emit(areas, ratio, weighting, config.sparse_threshold, rows,
-                      residual);
+    const std::vector<double> weight = weight_ratios(
+        areas, rays_per_row, config.triangulation.area_weights);
+    const VfEmit emit(areas, ratio, weight, weighting, config.sparse_threshold,
+                      rows, residual);
     const unsigned scan_threads = worker_count(tuning, faces, faces * cols);
 
     if (const auto* mapped =

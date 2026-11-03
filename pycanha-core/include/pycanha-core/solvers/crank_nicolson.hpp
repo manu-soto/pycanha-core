@@ -29,7 +29,9 @@ namespace pycanha::solvers::transient {
  * reads the couplings and the capacities again, so formulas and callbacks
  * may change them during the run; with fixed_couplings they are read once
  * per solve() and the matrix is factorized again only when the temperatures
- * change it. A step whose inner
+ * change it. With reuse_factors each inner iteration solves for the
+ * temperature change, so the residual of the iteration on old factors does
+ * not stay in the temperatures. A step whose inner
  * iterations do not converge within max_iterations keeps its last iteration
  * and the run goes on: the first such step logs a WARN, the end of the run
  * one summary WARN, and report() lists them.
@@ -120,6 +122,9 @@ class CrankNicolson : public Solver {
 
     VectorXd _radiation_linear_term;
     VectorXd _kt_q_n0;
+    // (A + 2C/dt) T, subtracted from the right-hand side when reuse_factors
+    // solves for the change.
+    VectorXd _a_times_t;
     VectorXd _ones_domain;
     VectorXd _ones_boundary;
 };

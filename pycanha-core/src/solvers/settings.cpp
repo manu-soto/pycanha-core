@@ -242,6 +242,10 @@ std::string_view at_least_one(const int& value) {
 std::string_view non_negative_count(const int& value) {
     return value >= 0 ? std::string_view{} : "must not be negative";
 }
+std::string_view below_one(const double& value) {
+    return value > 0.0 && value < 1.0 ? std::string_view{}
+                                      : "must be between 0 and 1";
+}
 std::string_view not_empty(const std::string& value) {
     return value.empty() ? "must not be empty" : std::string_view{};
 }
@@ -321,6 +325,17 @@ std::string default_output_name(const Settings& /*settings*/,
     return name;
 }
 
+// The relative residual at which the iteration on old factors stops. It
+// stays in each change, and the loop stops on a change below the tolerance,
+// so the error it leaves scales with the tolerance whatever this value:
+// 1e-2 keeps it near 1 % of the tolerance and is the fastest such value.
+double default_reuse_tolerance(const Settings& /*settings*/,
+                               const ResolvedSettings& /*resolved*/,
+                               const ResolveContext& /*context*/) {
+    constexpr double relative_residual = 1e-2;
+    return relative_residual;
+}
+
 std::map<int, int> default_iparm(const Settings& /*settings*/,
                                  const ResolvedSettings& /*resolved*/,
                                  const ResolveContext& /*context*/) {
@@ -373,6 +388,9 @@ PardisoLevel default_pardiso_level(const Settings& settings,
 // Applicability beyond the solver type
 // ---------------------------------------------------------------------------
 
+bool reuses_factors(const ResolvedSettings& resolved) {
+    return resolved.reuse_factors;
+}
 bool uses_pardiso(const ResolvedSettings& resolved) {
     return resolved.backend == Backend::PARDISO;
 }
@@ -612,7 +630,7 @@ using R = ResolvedSettings;
 
 // Resolution walks the table in order: a default or an applicability rule
 // may only read fields above it.
-constexpr std::size_t field_count = 21;
+constexpr std::size_t field_count = 22;
 constexpr std::array<FieldEntry, field_count> field_table{
     field<Path<&S::tolerance>, Path<&R::tolerance>,
           &constant<default_tolerance>, &positive>(
@@ -671,14 +689,27 @@ constexpr std::array<FieldEntry, field_count> field_table{
          .doc = "Solve a changed matrix by iterating on the factors of an "
                 "earlier one, and refactorize only when that fails. Faster "
                 "when the matrix changes little between iterations or time "
-                "steps. The iteration stops at a relative residual of 1e-6, "
-                "and that residual stays in the temperatures. PARDISO "
-                "iterates with CGS (iparm[3] = 61, overridden by "
-                "pardiso.iparm) and needs the one-level factorization; "
-                "LAPACK with FGMRES, on 20 iterations at most. Not with "
-                "EIGEN or ACCELERATE.",
+                "steps. Each iteration then solves for the temperature "
+                "change, A dT = b - A T, so the iteration's residual "
+                "(reuse_tolerance) stays in a change that shrinks as the "
+                "solve converges, not in the temperatures. PARDISO iterates "
+                "with CGS (iparm[3], overridden by pardiso.iparm) and needs "
+                "the one-level factorization; LAPACK with FGMRES, on 20 "
+                "iterations at most. Not with EIGEN or ACCELERATE.",
          .mutability = Mutability::INIT,
          .solver_types = reuse_types}),
+    field<Path<&S::reuse_tolerance>, Path<&R::reuse_tolerance>,
+          &default_reuse_tolerance, &below_one>(
+        {.name = "reuse_tolerance",
+         .group = "",
+         .doc = "Relative residual at which the iteration on old factors "
+                "stops (reuse_factors). It is left in each change, so the "
+                "temperatures keep about reuse_tolerance x tolerance of it. "
+                "PARDISO stops at the decade at or below it (iparm[3] = "
+                "10 L + 1 for 1e-L); LAPACK's FGMRES at it. Default: 1e-2.",
+         .mutability = Mutability::INIT,
+         .solver_types = reuse_types},
+        &reuses_factors, "only with reuse_factors = true"),
     field<Path<&S::fixed_couplings>, Path<&R::fixed_couplings>,
           &constant<default_fixed_couplings>, &any_value<bool>>(
         {.name = "fixed_couplings",
