@@ -283,7 +283,8 @@ std::uint64_t ExchangeAccumImpl::conservation_error() const {
 
 NodeExchangeAccumImpl::NodeExchangeAccumImpl(
     SceneImpl& scene, Band band, std::span<const NodeNum> node_numbers,
-    const AccumConfig& config, std::span<const std::int32_t> absorptance_groups)
+    const AccumConfig& config, std::span<const std::int32_t> absorptance_groups,
+    std::span<const std::uint64_t> rays_per_face)
     : _scene(scene), _band(band), _config(config) {
     const std::size_t faces = _scene.num_faces();
     if (node_numbers.size() != faces) {
@@ -361,6 +362,35 @@ NodeExchangeAccumImpl::NodeExchangeAccumImpl(
     for (const std::uint64_t count : node_faces) {
         _max_node_faces = std::max(_max_node_faces, count);
     }
+    if (!rays_per_face.empty()) {
+        if (rays_per_face.size() != faces) {
+            throw std::invalid_argument(
+                "pycanha::radiative: rays_per_face size must match the face "
+                "count");
+        }
+        _allocation.assign(rays_per_face.begin(), rays_per_face.end());
+        for (std::size_t face = 0; face < faces; ++face) {
+            if (_allocation[face] > 0 && _face_column[face] < nodes) {
+                _allocation_ref =
+                    _allocation_ref == 0
+                        ? _allocation[face]
+                        : std::min(_allocation_ref, _allocation[face]);
+            }
+        }
+        if (_allocation_ref == 0) {
+            throw std::invalid_argument(
+                "pycanha::radiative: rays_per_face gives no face of a node "
+                "any rays");
+        }
+        if (tri.mode == TriangulationMode::RayDensity && !tri.area_weights) {
+            // The face assembly would weigh a pair's directions by each
+            // face's own rays, which node rows cannot know while tracing.
+            throw std::invalid_argument(
+                "pycanha::radiative: rays_per_face with RayDensity needs "
+                "TriangulationConfig::area_weights (the directions weighed "
+                "by area, as node rows weigh them)");
+        }
+    }
 
     std::uint64_t buffer_rows = nodes;
     if (_config.layout == AccumLayout::Tiled) {
@@ -426,6 +456,24 @@ void NodeExchangeAccumImpl::reset() {
     _fp_scale = 0.0;
     _rays_per_face = 0;
     _total_rays = 0;
+    if (!_allocation.empty()) {
+        // The emitters are the allocation's, fixed now: each batch traces a
+        // part of them, each face once.
+        const std::uint32_t none = num_nodes();
+        for (std::uint32_t face = 0; face < _allocation.size(); ++face) {
+            if (_allocation[face] > 0 && _face_column[face] != none) {
+                _emitters.push_back(face);
+            }
+        }
+        std::ranges::sort(_emitters, [this](std::uint32_t a, std::uint32_t b) {
+            return _face_column[a] != _face_column[b]
+                       ? _face_column[a] < _face_column[b]
+                       : a < b;
+        });
+        fix_weights();
+        _traced.assign(_allocation.size(), 0);
+        _rays_per_face = _allocation_ref;
+    }
 }
 
 void NodeExchangeAccumImpl::clear_block_scratch() {
@@ -454,6 +502,23 @@ std::vector<std::uint32_t> NodeExchangeAccumImpl::prepare_emitters(
             "pycanha::radiative: an emitter is listed twice; a "
             "NodeExchangeAccumulator needs every emitter to send the same "
             "rays");
+    }
+    if (!_allocation.empty()) {
+        // A part of the allocation, each face once over all batches.
+        for (const std::uint32_t face : emitters) {
+            if (_allocation[face] == 0) {
+                throw std::invalid_argument(
+                    "pycanha::radiative: face " + std::to_string(face) +
+                    " has no rays in this accumulator's rays_per_face");
+            }
+            if (_traced[face] != 0) {
+                throw std::invalid_argument(
+                    "pycanha::radiative: face " + std::to_string(face) +
+                    " was traced already; with rays_per_face each face is "
+                    "traced once, with its rays");
+            }
+        }
+        return emitters;
     }
     if (_emitters.empty()) {
         _emitters = emitters;
@@ -503,12 +568,48 @@ void NodeExchangeAccumImpl::fix_weights() {
         weights[(record * face) + 2] =
             static_cast<float>(areas[face] - static_cast<double>(high));
         _emitted_area += areas[face] * emissivity[face];
+        if (!_allocation.empty()) {
+            // A ray of a face traced N times carries N_ref / N of the unit:
+            // the face's rays add up to what N_ref uniform rays would. The u
+            // above stays the area: the two directions of a pair are weighed
+            // by area whatever the rays (TriangulationConfig::area_weights).
+            weights[(record * face) + 3] =
+                static_cast<float>(static_cast<double>(_allocation_ref) /
+                                   static_cast<double>(_allocation[face]));
+        }
     }
     _scene.upload_to_device_buffer(_face_weights_buf, weights.data(),
                                    weights.size() * sizeof(float));
 }
 
+void NodeExchangeAccumImpl::check_allocation(
+    std::span<const std::uint32_t> emitters,
+    std::uint64_t rays_per_face) const {
+    for (const std::uint32_t face : emitters) {
+        if (_allocation[face] != rays_per_face) {
+            throw std::invalid_argument(
+                "pycanha::radiative: face " + std::to_string(face) +
+                " is allocated " + std::to_string(_allocation[face]) +
+                " rays; this batch traces " + std::to_string(rays_per_face));
+        }
+    }
+}
+
 float NodeExchangeAccumImpl::prepare_batch(std::uint64_t rays_per_face) {
+    if (!_allocation.empty()) {
+        // Every face's rays add up to N_ref units whatever its N: the row
+        // budget is that of a uniform trace of N_ref rays.
+        if (_fp_scale <= 0.0) {
+            _fp_scale = select_fp_scale(_allocation_ref * _max_node_faces);
+        }
+        if (_allocation_ref * _max_node_faces >
+            max_cumulative_rays(_fp_scale)) {
+            throw std::invalid_argument(
+                "pycanha::radiative: the allocation exceeds the fixed-point "
+                "accumulation range of the largest node");
+        }
+        return static_cast<float>(_fp_scale);
+    }
     // A node row holds the deposits of all its faces' rays.
     if (_fp_scale <= 0.0) {
         _fp_scale = select_fp_scale(rays_per_face * _max_node_faces);
@@ -552,11 +653,28 @@ void NodeExchangeAccumImpl::absorb_compact(
 
 void NodeExchangeAccumImpl::record_batch(
     std::span<const std::uint32_t> emitters, std::uint64_t rays_per_face) {
-    _rays_per_face += rays_per_face;
+    if (!_allocation.empty()) {
+        for (const std::uint32_t face : emitters) {
+            _traced[face] = 1;
+        }
+    } else {
+        _rays_per_face += rays_per_face;
+    }
     _total_rays += rays_per_face * emitters.size();
 }
 
 NodeExchangeResult NodeExchangeAccumImpl::build_result() const {
+    if (!_allocation.empty()) {
+        // A face left out would leave its node rows short of its share.
+        const auto missing = std::ranges::count_if(
+            _emitters,
+            [this](std::uint32_t face) { return _traced[face] == 0; });
+        if (missing > 0) {
+            throw std::logic_error(
+                "pycanha::radiative: " + std::to_string(missing) +
+                " face(s) of rays_per_face not traced yet");
+        }
+    }
     const std::size_t nodes = _nodes.size();
     const std::size_t cols =
         columns() + static_cast<std::size_t>(num_virtual_columns);

@@ -646,3 +646,176 @@ TEST_CASE("radiative vulkan: absorptance groups refuse what they cannot trace",
     bench.scene.accumulate_exchange(acc, settings, {});
     REQUIRE(acc.result().absorptance_derivatives.empty());
 }
+
+namespace {
+
+// As with_triangulation, with TriangulationConfig::area_weights as given.
+[[nodiscard]] rad::AccumConfig with_triangulation(rad::TriangulationMode mode,
+                                                  bool area_weights,
+                                                  bool keep_full) {
+    rad::AccumConfig config = with_triangulation(mode, keep_full);
+    config.triangulation.area_weights = area_weights;
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE(
+    "radiative vulkan: rays per face sum to the face result with area "
+    "weights",
+    "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    Bench bench;
+    // Two ray levels, a face of every third pair given 4x the rays of the
+    // others, and a face of every 13th not traced at all.
+    constexpr std::uint64_t low = 1'000;
+    constexpr std::uint64_t high = 4'000;
+    std::vector<std::uint64_t> rays(num_faces, low);
+    std::vector<std::uint32_t> many;
+    std::vector<std::uint32_t> few;
+    for (std::uint32_t face = 0; face < num_faces; ++face) {
+        if (face % 13 == 7) {
+            rays[face] = 0;
+        } else if ((face / 2) % 3 == 1) {
+            rays[face] = high;
+            many.push_back(face);
+        } else {
+            few.push_back(face);
+        }
+    }
+    rad::TraceSettings settings;
+    settings.seed = 3;
+    // The face rows: the larger batch first (it sets their fixed-point
+    // scale), each row normalised by its own rays, the directions of a pair
+    // weighed by area.
+    rad::ExchangeAccumulator face(
+        bench.scene, rad::Band::IR,
+        with_triangulation(rad::TriangulationMode::RayDensity, true, true));
+    settings.rays_per_face = high;
+    bench.scene.accumulate_exchange(face, settings, many);
+    settings.rays_per_face = low;
+    bench.scene.accumulate_exchange(face, settings, few);
+    const Summed summed = sum_to_nodes(bench.scene, face.result(), bench.nodes);
+
+    // The node rows, the batches in the other order: the allocation fixes
+    // the weights and the scale, not the first batch.
+    const auto trace = [&](rad::NodeExchangeAccumulator& acc) {
+        settings.rays_per_face = low;
+        bench.scene.accumulate_exchange(acc, settings, few);
+        settings.rays_per_face = high;
+        bench.scene.accumulate_exchange(acc, settings, many);
+        return acc.result();
+    };
+    rad::NodeExchangeAccumulator dense(
+        bench.scene, rad::Band::IR, bench.nodes,
+        with_triangulation(rad::TriangulationMode::RayDensity, true, false), {},
+        rays);
+    const rad::NodeExchangeResult reference = trace(dense);
+    require_matches(reference, summed);
+    REQUIRE(reference.stats.rays_per_face == low);
+
+    rad::AccumConfig config =
+        with_triangulation(rad::TriangulationMode::RayDensity, true, false);
+    config.layout = rad::AccumLayout::Tiled;
+    config.tile_rows = 7;
+    rad::NodeExchangeAccumulator tiled(bench.scene, rad::Band::IR, bench.nodes,
+                                       config, {}, rays);
+    const rad::NodeExchangeResult result = trace(tiled);
+    REQUIRE(csr_bit_identical(result.factors, reference.factors));
+}
+
+TEST_CASE("radiative vulkan: rays per face alike give the uniform trace",
+          "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    Bench bench;
+    std::vector<std::uint32_t> subset;
+    std::vector<std::uint64_t> rays(num_faces, 0);
+    for (std::uint32_t face = 0; face < num_faces; face += 3) {
+        subset.push_back(face);
+        rays[face] = 2'000;
+    }
+    rad::TraceSettings settings;
+    settings.rays_per_face = 2'000;
+    settings.seed = 5;
+    for (const bool area_weights : {false, true}) {
+        INFO("area weights " << area_weights);
+        const rad::AccumConfig config =
+            with_triangulation(area_weights ? rad::TriangulationMode::RayDensity
+                                            : rad::TriangulationMode::None,
+                               area_weights, false);
+        rad::NodeExchangeAccumulator uniform(bench.scene, rad::Band::IR,
+                                             bench.nodes, config);
+        bench.scene.accumulate_exchange(uniform, settings, subset);
+        rad::NodeExchangeAccumulator allocated(bench.scene, rad::Band::IR,
+                                               bench.nodes, config, {}, rays);
+        bench.scene.accumulate_exchange(allocated, settings, subset);
+        const rad::NodeExchangeResult a = uniform.result();
+        const rad::NodeExchangeResult b = allocated.result();
+        REQUIRE(csr_bit_identical(b.factors, a.factors));
+        REQUIRE(b.intra_node_total == a.intra_node_total);
+        REQUIRE(b.stats.rays_per_face == a.stats.rays_per_face);
+    }
+}
+
+TEST_CASE("radiative vulkan: rays per face refuse what they cannot trace",
+          "[radiative][gpu][vulkan][nodes]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    Bench bench;
+    const rad::AccumConfig area =
+        with_triangulation(rad::TriangulationMode::RayDensity, true, false);
+    const auto make = [&](std::span<const std::uint64_t> rays,
+                          const rad::AccumConfig& config) {
+        return rad::NodeExchangeAccumulator(bench.scene, rad::Band::IR,
+                                            bench.nodes, config, {}, rays);
+    };
+    const std::vector<std::uint64_t> short_rays(num_faces - 1, 100);
+    REQUIRE_THROWS_AS(make(short_rays, area), std::invalid_argument);
+    const std::vector<std::uint64_t> none(num_faces, 0);
+    REQUIRE_THROWS_AS(make(none, area), std::invalid_argument);
+    std::vector<std::uint64_t> rays(num_faces, 0);
+    rays[0] = 100;
+    rays[1] = 100;
+    rays[2] = 400;
+    // RayDensity weighing each face by its own rays: not node rows' weights.
+    REQUIRE_THROWS_AS(
+        make(rays, with_triangulation(rad::TriangulationMode::RayDensity, false,
+                                      false)),
+        std::invalid_argument);
+
+    rad::NodeExchangeAccumulator acc = make(rays, area);
+    rad::TraceSettings settings;
+    settings.rays_per_face = 100;
+    const std::vector<std::uint32_t> first = {0, 1};
+    const std::vector<std::uint32_t> wrong_rays = {2};
+    const std::vector<std::uint32_t> not_allocated = {3};
+    REQUIRE_THROWS_AS(
+        bench.scene.accumulate_exchange(acc, settings, wrong_rays),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        bench.scene.accumulate_exchange(acc, settings, not_allocated),
+        std::invalid_argument);
+    bench.scene.accumulate_exchange(acc, settings, first);
+    REQUIRE_THROWS_AS(bench.scene.accumulate_exchange(acc, settings, first),
+                      std::invalid_argument);
+    // Face 2 not traced yet.
+    REQUIRE_THROWS_AS(acc.result(), std::logic_error);
+    settings.rays_per_face = 400;
+    bench.scene.accumulate_exchange(acc, settings, wrong_rays);
+    REQUIRE(acc.result().stats.rays_per_face == 100);
+    // A reset accumulator traces the allocation again.
+    acc.reset();
+    REQUIRE_THROWS_AS(acc.result(), std::logic_error);
+    bench.scene.accumulate_exchange(acc, settings, wrong_rays);
+    settings.rays_per_face = 100;
+    bench.scene.accumulate_exchange(acc, settings, first);
+    REQUIRE_NOTHROW(acc.result());
+}

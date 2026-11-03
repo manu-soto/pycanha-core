@@ -47,7 +47,8 @@ static const uint FLAG_NODE_FORWARD_ONLY = 256u;
 [[vk::binding(10, 0)]] StructuredBuffer<uint> node_column;
 // x: the face's emission share; y + z: the u its blend weight reads (the
 // face's area when it emits, 0 when it does not) as a float and the rest of
-// the double below it; w unused.
+// the double below it; w the ray weight N_ref / N of a face of a per-face
+// ray allocation (rays_per_face), 0 on a uniform trace.
 [[vk::binding(11, 0)]] StructuredBuffer<float4> node_weight;
 
 // The fixed-point amount times a share in [0, 1], in integers: the share as a
@@ -231,6 +232,12 @@ uint64_t tail_signed(uint64_t amount, float4 emitter) {
     return amount;
 }
 
+// to_fp in a given unit: the same arithmetic, so a unit of fp_scale gives
+// to_fp's bits.
+uint64_t to_fp_unit(float energy, float unit) {
+    return uint64_t(energy * unit + 0.5);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csMain(uint3 gid: SV_DispatchThreadID) {
@@ -264,9 +271,20 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     float3 origin = ray.origin;
     float3 dir = ray.direction;
     float energy = 1.0;
+    // The fixed-point unit of this path's energy: fp_scale, or in node rows
+    // with a per-face ray allocation (NodeExchangeAccumulator's
+    // rays_per_face) fp_scale * w, w = N_ref / N for a face traced N times
+    // (emitter.w; 0 on a uniform trace), so that the face's rays add up to
+    // what N_ref uniform rays would and the row is normalised by N_ref.
+    float fp_unit = pc.fp_scale;
+#if !defined(PYCANHA_METAL_BACKEND)
+    if ((pc.flags & FLAG_NODE_ROWS) != 0u && emitter.w > 0.0) {
+        fp_unit = pc.fp_scale * emitter.w;
+    }
+#endif
     // fp_scale is a power of two, so to_fp(1.0) equals it exactly and the
-    // host can compute rays * fp_scale without rounding.
-    uint64_t fp_remaining = to_fp(1.0);
+    // host can compute rays * fp_scale without rounding (w = 1: the same).
+    uint64_t fp_remaining = to_fp_unit(1.0, fp_unit);
     // Absorptance groups: the path's score per group, which starts at 1/a of
     // the emitting face for its own group (see derivative_add).
     float4 score = float4(0.0, 0.0, 0.0, 0.0);
@@ -331,7 +349,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         // Deposit BEFORE the RR test and before event selection (reordering
         // would bias the estimate).
         float energy_after = energy * (1.0 - a);
-        uint64_t fp_after = to_fp(energy_after);
+        uint64_t fp_after = to_fp_unit(energy_after, fp_unit);
         value = deposit(row_base, face, emitter, hit.face,
                         fp_remaining - fp_after, cell);
         derivative_add(cell, value, score, hit_group, a > 0.0 ? 1.0 / a : 0.0);
@@ -345,7 +363,7 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
         if (energy < pc.energy_threshold) {
             float u_rr = rng_next(rng);
             if (u_rr * pc.energy_threshold < energy) {
-                uint64_t fp_boost = to_fp(pc.energy_threshold);
+                uint64_t fp_boost = to_fp_unit(pc.energy_threshold, fp_unit);
                 // Wrapping subtraction: the boost's fixed-point gain is
                 // withdrawn from the lost column to keep the row balance
                 // exact.

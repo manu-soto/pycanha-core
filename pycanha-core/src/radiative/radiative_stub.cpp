@@ -151,7 +151,8 @@ detail::SolarAccumImpl& SolarAccumulator::impl() noexcept { return *_impl; }
 NodeExchangeAccumulator::NodeExchangeAccumulator(
     const RadiativeScene& /*scene*/, Band /*band*/,
     std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/,
-    std::span<const std::int32_t> /*absorptance_groups*/) {
+    std::span<const std::int32_t> /*absorptance_groups*/,
+    std::span<const std::uint64_t> /*rays_per_face*/) {
     throw_unavailable();
 }
 NodeExchangeAccumulator::~NodeExchangeAccumulator() = default;
