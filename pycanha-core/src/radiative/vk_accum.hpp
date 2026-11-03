@@ -149,10 +149,11 @@ class ExchangeAccumImpl {
 // into host rows as ExchangeAccumImpl does with face rows.
 class NodeExchangeAccumImpl {
   public:
-    NodeExchangeAccumImpl(
-        SceneImpl& scene, Band band, std::span<const NodeNum> node_numbers,
-        const AccumConfig& config,
-        std::span<const std::int32_t> absorptance_groups = {});
+    NodeExchangeAccumImpl(SceneImpl& scene, Band band,
+                          std::span<const NodeNum> node_numbers,
+                          const AccumConfig& config,
+                          std::span<const std::int32_t> absorptance_groups = {},
+                          std::span<const std::uint64_t> rays_per_face = {});
     ~NodeExchangeAccumImpl();
     NodeExchangeAccumImpl(const NodeExchangeAccumImpl&) = delete;
     NodeExchangeAccumImpl& operator=(const NodeExchangeAccumImpl&) = delete;
@@ -208,6 +209,13 @@ class NodeExchangeAccumImpl {
     // depends on whether it emits); a later batch must name the same set.
     [[nodiscard]] std::vector<std::uint32_t> prepare_emitters(
         std::vector<std::uint32_t> emitters);
+    // With rays_per_face (an allocation): whether one is set, and the check
+    // that every face of a batch is traced with the rays allocated to it.
+    [[nodiscard]] bool allocated() const noexcept {
+        return !_allocation.empty();
+    }
+    void check_allocation(std::span<const std::uint32_t> emitters,
+                          std::uint64_t rays_per_face) const;
     // As ExchangeAccumImpl::prepare_batch, with the budget of a node row: the
     // rays of all its faces.
     [[nodiscard]] float prepare_batch(std::uint64_t rays_per_face);
@@ -244,12 +252,20 @@ class NodeExchangeAccumImpl {
     GpuBuffer _cells;             // device-local u64, stride columns() + 3
     GpuBuffer _readback;          // host-visible mirror of _cells
     GpuBuffer _face_columns_buf;  // u32 per face
-    GpuBuffer _face_weights_buf;  // float4 per face (share, u, u rest, 0)
+    // float4 per face (share, u, u rest, w): w is 0, or with an allocation
+    // the face's ray weight N_ref / N (its rays carry that much of the unit)
+    GpuBuffer _face_weights_buf;
     std::vector<HostCountRow> _host_rows;  // Tiled: per node row
     std::vector<std::uint32_t> _emitters;  // fixed by the first batch
     double _fp_scale = 0.0;
     std::uint64_t _rays_per_face = 0;
     std::uint64_t _total_rays = 0;
+    // An allocation (rays_per_face given): the rays of each face (0: not
+    // traced), the fewest any traced face has (N_ref: the result is
+    // normalised as a uniform trace of N_ref rays) and which are traced yet.
+    std::vector<std::uint64_t> _allocation;
+    std::uint64_t _allocation_ref = 0;
+    std::vector<std::uint8_t> _traced;
     // Absorptance groups (Dense only).
     std::uint32_t _derivative_count = 0;
     GpuBuffer _groups_buf;        // u32 per face, ~0u for no group

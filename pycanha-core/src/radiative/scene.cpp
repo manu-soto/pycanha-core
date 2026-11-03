@@ -153,7 +153,8 @@ detail::ExchangeAccumImpl& ExchangeAccumulator::impl() noexcept {
 NodeExchangeAccumulator::NodeExchangeAccumulator(
     const RadiativeScene& /*scene*/, Band /*band*/,
     std::span<const NodeNum> /*node_numbers*/, AccumConfig /*config*/,
-    std::span<const std::int32_t> /*absorptance_groups*/) {
+    std::span<const std::int32_t> /*absorptance_groups*/,
+    std::span<const std::uint64_t> /*rays_per_face*/) {
     throw_no_metal_nodes();
 }
 
@@ -166,9 +167,11 @@ NodeExchangeResult NodeExchangeAccumulator::result() const {
 NodeExchangeAccumulator::NodeExchangeAccumulator(
     const RadiativeScene& scene, Band band,
     std::span<const NodeNum> node_numbers, AccumConfig config,
-    std::span<const std::int32_t> absorptance_groups)
+    std::span<const std::int32_t> absorptance_groups,
+    std::span<const std::uint64_t> rays_per_face)
     : _impl(std::make_unique<detail::NodeExchangeAccumImpl>(
-          scene.impl(), band, node_numbers, config, absorptance_groups)) {}
+          scene.impl(), band, node_numbers, config, absorptance_groups,
+          rays_per_face)) {}
 
 void NodeExchangeAccumulator::reset() { _impl->reset(); }
 

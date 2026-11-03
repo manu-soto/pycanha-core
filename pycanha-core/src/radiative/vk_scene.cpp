@@ -1231,6 +1231,11 @@ void SceneImpl::accumulate_exchange(NodeExchangeAccumImpl& acc,
     if (list.empty()) {
         return;
     }
+    if (acc.allocated()) {
+        // With rays_per_face, each batch is a part of the allocation traced
+        // with the rays allocated to its faces.
+        acc.check_allocation(list, settings.rays_per_face);
+    }
     const float fp_scale = acc.prepare_batch(settings.rays_per_face);
 
     KernelDispatch kernel;

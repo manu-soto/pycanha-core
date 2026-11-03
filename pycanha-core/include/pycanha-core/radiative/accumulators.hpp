@@ -92,7 +92,8 @@ class ExchangeAccumulator {
 //
 // Requirements, checked: every batch traces the same emitters (rays may
 // differ between batches but not between faces, which is what lets the
-// face pair weights be known while tracing); TriangulationMode None or
+// face pair weights be known while tracing; or see rays_per_face below);
+// TriangulationMode None or
 // RayDensity (ConstrainedLeastSquares is a projection over the whole face
 // matrix); keep_full_matrix off. A RayDensity trace weighs the two
 // directions by the faces' areas, which on such a uniform trace is what
@@ -103,12 +104,24 @@ class ExchangeAccumulator {
 // derivatives of its factors with respect to the band absorptance of the
 // group's faces (NodeExchangeResult::absorptance_derivatives), traced with
 // the same rays. Dense layout only.
+//
+// rays_per_face (optional): one per scene face, a per-face ray allocation
+// (0: the face is not traced). Each batch then traces some of these faces,
+// each with the rays allocated to it (a batch of rays_per_face N takes faces
+// allocated N), and every allocated face exactly once before result(). A ray
+// of a face traced N times carries N_ref / N of a uniform ray's weight, N_ref
+// the fewest rays any face of a node has, and the result is normalised as a
+// uniform trace of N_ref rays (stats.rays_per_face): the same expectation
+// whatever the allocation, only the noise moves. With RayDensity it needs
+// TriangulationConfig::area_weights, which weighs a pair's directions by
+// area as node rows do.
 class NodeExchangeAccumulator {
   public:
     NodeExchangeAccumulator(
         const RadiativeScene& scene, Band band,
         std::span<const NodeNum> node_numbers, AccumConfig config = {},
-        std::span<const std::int32_t> absorptance_groups = {});
+        std::span<const std::int32_t> absorptance_groups = {},
+        std::span<const std::uint64_t> rays_per_face = {});
     ~NodeExchangeAccumulator();
     NodeExchangeAccumulator(NodeExchangeAccumulator&&) noexcept;
     NodeExchangeAccumulator& operator=(NodeExchangeAccumulator&&) noexcept;
