@@ -98,6 +98,11 @@ class Recipe_pycanha_core(ConanFile):
         "PYCANHA_OPTION_SANITIZE_ADDR": False,
         "PYCANHA_OPTION_SANITIZE_UNDEF": False,
         "PYCANHA_OPTION_RAYTRACING": True,
+        # The tracer is headless: no window-system entry points. The volk
+        # recipe enables X11 and Wayland by default on Linux and requires
+        # xorg/system for them (conan-center-index #31042).
+        "volk/*:with_x11": False,
+        "volk/*:with_wayland": False,
         "spdlog/*:use_std_fmt": True,
         # Boost.Multiprecision (BSL-1.0) instead of SymEngine's default GMP
         # (LGPL), which would be statically linked into every binary.

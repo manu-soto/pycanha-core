@@ -243,6 +243,15 @@ if(PYCANHA_OPTION_RAYTRACING)
             VMA_STATIC_VULKAN_FUNCTIONS=0
             VMA_DYNAMIC_VULKAN_FUNCTIONS=1
         )
+        # The volk recipe defines VK_USE_PLATFORM_WIN32_KHR on Windows
+        # (conan-center-index #31042), so volk.h now includes <windows.h>,
+        # whose min/max macros break every std::min / std::max after it.
+        if(WIN32)
+            target_compile_definitions(${LIB_NAME} PRIVATE
+                NOMINMAX
+                WIN32_LEAN_AND_MEAN
+            )
+        endif()
         set(PYCANHA_KERNEL_TARGET spirv)
     endif()
 
