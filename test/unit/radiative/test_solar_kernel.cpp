@@ -2,9 +2,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstddef>
 #include <memory>
 #include <numbers>
+#include <span>
 #include <stdexcept>
+#include <string>
 
 #include "pycanha-core/gmm/geometrymodel.hpp"
 #include "pycanha-core/gmm/mesh/thermal_mesh.hpp"
@@ -80,6 +83,47 @@ void check_cosine_angle(rad::RadiativeScene& scene,
     REQUIRE(result.total(1) == 0.0);
 }
 
+// A unit plate at z = 0 (faces 0/1) under unit sheets (faces
+// 2/3, 4/5, ...), side 1 of each facing +z. Sheet k is at height
+// sheets[k][0] along its edge x = 0 and sheets[k][1] along its edge x = 1.
+[[nodiscard]] std::unique_ptr<pycanha::gmm::GeometryModel>
+make_plate_under_sheets(std::span<const std::array<double, 2>> sheets) {
+    using pycanha::gmm::GeometryItem;
+    using pycanha::gmm::Rectangle;
+    using pycanha::gmm::ThermalMesh;
+    auto model = std::make_unique<pycanha::gmm::GeometryModel>("layers");
+    model->add(std::make_shared<GeometryItem>(
+        "plate", Rectangle({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}),
+        ThermalMesh{}));
+    for (std::size_t k = 0; k < sheets.size(); ++k) {
+        const double z0 = sheets[k][0];
+        const double z1 = sheets[k][1];
+        model->add(std::make_shared<GeometryItem>(
+            "sheet_" + std::to_string(k),
+            Rectangle({0.0, 0.0, z0}, {1.0, 0.0, z1}, {0.0, 1.0, z0}),
+            ThermalMesh{}));
+    }
+    return model;
+}
+
+// The sun straight down (-z) on a scene built on a Device of its own.
+[[nodiscard]] rad::SolarResult trace_vertical_sun(
+    pycanha::gmm::GeometryModel& model,
+    std::span<const std::array<float, 6>> rows,
+    std::span<const int> pair_rows) {
+    rad::Device device = rad::Device::create();
+    rad::RadiativeScene scene(device, model.mesh_parts(),
+                              make_materials(rows, pair_rows));
+    const rad::SolarState sun{.direction = {0.0, 0.0, -1.0},
+                              .irradiance = solar_constant};
+    rad::TraceSettings settings;
+    settings.rays_per_face = 5'000;
+    settings.seed = 29;
+    rad::SolarAccumulator acc(scene);
+    scene.accumulate_solar(sun, acc, settings);
+    return acc.result();
+}
+
 // Bit-equality of two solar results (integer cells make this exact).
 void require_bit_identical(const rad::SolarResult& result,
                            const rad::SolarResult& reference) {
@@ -140,6 +184,71 @@ TEST_CASE("radiative solar: occlusion shadows completely",
     REQUIRE(result.direct(3) ==
             Catch::Approx(solar_constant).margin(1e-3 * solar_constant));
     REQUIRE(result.direct(2) == 0.0);
+}
+
+TEST_CASE("radiative solar: layers closer than the ray offset still shadow",
+          "[radiative][gpu][solar]") {
+    if (!rad::is_available()) {
+        SUCCEED("no RT-capable GPU device: skipped");
+        return;
+    }
+    // Shadow rays leave a face by the ray-origin offset, 1e-4 of the scene's
+    // diagonal (times |p| past 1 m): 140-225 um in these 1.4-1.5 m scenes,
+    // three times or more the 50 um between the layers below. A layer that
+    // close to a face must still shadow it. CHECK, not REQUIRE, so that a
+    // failure reports all three scenes.
+    constexpr double height = 0.5;
+    constexpr double gap = 5e-5;
+    const std::array<float, 6> black = gray_row(1.0F);
+    const std::array<float, 6> clear{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    const double margin = 1e-3 * solar_constant;
+
+    // Two clear sheets 50 um apart over a black plate. Every ray through the
+    // upper sheet reaches the plate; the lower sheet is in the upper one's
+    // shadow and adds no sun of its own, so the plate gets one sun, not two.
+    {
+        const std::array<std::array<double, 2>, 2> sheets{
+            {{height, height}, {height + gap, height + gap}}};
+        auto model = make_plate_under_sheets(sheets);
+        const std::array<std::array<float, 6>, 2> rows{black, clear};
+        const std::array<int, 3> pair_rows{0, 1, 1};
+        const rad::SolarResult result =
+            trace_vertical_sun(*model, rows, pair_rows);
+        CHECK(result.direct(0) == 0.0);
+        CHECK(result.total(0) == Catch::Approx(solar_constant).margin(margin));
+        CHECK(result.total.sum() ==
+              Catch::Approx(solar_constant).margin(margin));
+    }
+
+    // The same sheets meeting along the edge x = 0 and 0.5 mm apart at x = 1:
+    // over the strip where they are closer than the offset (a third of the
+    // plate or more) the sun must not pass twice either.
+    {
+        const std::array<std::array<double, 2>, 2> sheets{
+            {{height, height}, {height, height + (10.0 * gap)}}};
+        auto model = make_plate_under_sheets(sheets);
+        const std::array<std::array<float, 6>, 2> rows{black, clear};
+        const std::array<int, 3> pair_rows{0, 1, 1};
+        const rad::SolarResult result =
+            trace_vertical_sun(*model, rows, pair_rows);
+        CHECK(result.total(0) == Catch::Approx(solar_constant).margin(margin));
+    }
+
+    // One black sheet 50 um over the black plate: the plate is in its
+    // shadow, and the sheet takes the whole sun.
+    {
+        const std::array<std::array<double, 2>, 1> sheets{{{gap, gap}}};
+        auto model = make_plate_under_sheets(sheets);
+        const std::array<std::array<float, 6>, 1> rows{black};
+        const std::array<int, 2> pair_rows{0, 0};
+        const rad::SolarResult result =
+            trace_vertical_sun(*model, rows, pair_rows);
+        CHECK(result.direct(0) == 0.0);
+        CHECK(result.total(0) == 0.0);
+        CHECK(result.direct(2) == Catch::Approx(solar_constant).margin(margin));
+        CHECK(result.total.sum() ==
+              Catch::Approx(solar_constant).margin(margin));
+    }
 }
 
 TEST_CASE("radiative solar: mirrors add a reflected component",
