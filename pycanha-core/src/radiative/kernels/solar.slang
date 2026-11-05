@@ -2,7 +2,9 @@
 // The source is a parallel sun along sun_direction() (unit, sun -> scene); the
 // host sets FLAG_SOLAR_BAND so every material lookup uses the solar triplet.
 // Each thread samples one point on its face, casts a shadow ray toward the
-// sun (any hit — including a planet part — means occluded/eclipsed), scores
+// sun (any hit — including a planet part — means occluded/eclipsed; the
+// stretch next to the face that its origin offset skips is checked by a
+// second, short ray traced back toward the face), scores
 // the absorbed direct energy, then follows the reflected/transmitted path
 // with the shared bounce physics, scoring absorption into total[] at every
 // hit.
@@ -78,10 +80,26 @@ void csMain(uint3 gid: SV_DispatchThreadID) {
     if (cos_theta <= 0.0) {
         return;  // this side faces away from the sun
     }
-    float3 origin = offset_origin(sample.position, sample.normal);
+    // The shadow ray cannot start on the face (it would hit it again), and an
+    // origin pushed off along the normal starts beyond any layer nearer to
+    // the face than the offset: the face then counts itself sunlit behind
+    // that layer, so an opaque sheet that close lets the sun through and a
+    // pair of clear sheets that close passes it twice. The ray starts on the
+    // shadow line instead, as high above the face as the offset (lift along
+    // it), and a second ray traced back from there checks the stretch the
+    // first one skips: the first face it meets must be this one.
+    float3 lifted = offset_origin(sample.position, sample.normal);
+    float lift = dot(lifted - sample.position, sample.normal) / cos_theta;
+    lift = min(lift, 1.0e30);  // finite at grazing sun; e0 is ~0 there
+    float3 origin = sample.position - sun_dir * lift;
     Hit shadow = trace_ray(origin, -sun_dir);
     if (!shadow.miss) {
         return;  // occluded by other geometry (or eclipsed by the planet)
+    }
+    Hit below = trace_ray(origin, sun_dir);
+    if (!below.miss && below.face != face &&
+        dot(below.position - origin, sun_dir) < lift) {
+        return;  // occluded by a layer between the face and `origin`
     }
 
     float a;
